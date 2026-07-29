@@ -26,6 +26,31 @@ static void *gCSHandle = NULL;  // CoreSimulator
 static void *gSKHandle = NULL;  // SimulatorKit
 static void *gAXHandle = NULL;  // AccessibilityPlatformTranslation
 
+// dlerror() is a one-shot global: it must be read immediately after the dlopen
+// that failed, or a later call clobbers it. Capture each one at the source.
+static NSString *gCSError = nil;
+static NSString *gSKError = nil;
+static NSString *gAXError = nil;
+
+// Hard limits for a single accessibility walk. A wedged simulator answers no
+// reads at all; without these the daemon hangs forever.
+static const NSTimeInterval TSTAXWalkDeadline = 25.0;  // stop descending after this
+static const int64_t TSTAXWaitSeconds = 30;            // give up on the walk entirely
+
+// dlopen + capture the error string (nil-safe: dlerror may be invalid UTF-8).
+static void *TSTDLOpen(const char *path, NSString * __strong *errOut) {
+  dlerror();  // clear any stale error
+  void *h = dlopen(path, RTLD_NOW);
+  if (!h) {
+    const char *e = dlerror();
+    NSString *s = e ? [NSString stringWithUTF8String:e] : nil;
+    *errOut = s ?: @"unknown dlopen failure";
+  } else {
+    *errOut = nil;
+  }
+  return h;
+}
+
 static NSError *TSTMakeError(NSInteger code, NSString *msg) {
   return [NSError errorWithDomain:TSTErrorDomain code:code
                          userInfo:@{NSLocalizedDescriptionKey: msg}];
@@ -35,13 +60,17 @@ static NSError *TSTMakeError(NSInteger code, NSString *msg) {
 static NSString *TSTDeveloperDir(void) {
   const char *env = getenv("DEVELOPER_DIR");
   if (env && strlen(env) > 0) {
-    return [NSString stringWithUTF8String:env];
+    NSString *fromEnv = [NSString stringWithUTF8String:env];  // nil if not UTF-8
+    if (fromEnv.length) return fromEnv;
   }
   FILE *fp = popen("/usr/bin/xcode-select -p 2>/dev/null", "r");
   if (!fp) return @"/Applications/Xcode.app/Contents/Developer";
   char buf[1024];
   NSMutableString *out = [NSMutableString string];
-  while (fgets(buf, sizeof(buf), fp)) [out appendString:[NSString stringWithUTF8String:buf]];
+  while (fgets(buf, sizeof(buf), fp)) {
+    NSString *chunk = [NSString stringWithUTF8String:buf];  // nil on invalid UTF-8
+    if (chunk) [out appendString:chunk];
+  }
   pclose(fp);
   NSString *trimmed = [out stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
   return trimmed.length ? trimmed : @"/Applications/Xcode.app/Contents/Developer";
@@ -55,6 +84,9 @@ static NSString *TSTDeveloperDir(void) {
   TSTMouseEventFn _mouseFn;
   TSTKeyboardFn _keyboardFn;
   CGSize _pixelSize;
+  // Walk state — only ever touched from the serial _axQueue.
+  CFAbsoluteTime _walkDeadline;
+  BOOL _walkTruncated;
 }
 @end
 
@@ -67,16 +99,18 @@ static NSString *TSTDeveloperDir(void) {
   static BOOL ok = NO;
   dispatch_once(&once, ^{
     NSString *dev = TSTDeveloperDir();
-    gCSHandle = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW);
+    gCSHandle = TSTDLOpen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", &gCSError);
     NSString *skPath = [dev stringByAppendingString:@"/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"];
-    gSKHandle = dlopen(skPath.UTF8String, RTLD_NOW);
-    gAXHandle = dlopen("/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation", RTLD_NOW);
+    gSKHandle = TSTDLOpen(skPath.UTF8String, &gSKError);
+    gAXHandle = TSTDLOpen("/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation", &gAXError);
     ok = (gCSHandle != NULL && gSKHandle != NULL);
   });
   if (!ok && error) {
     *error = TSTMakeError(1, [NSString stringWithFormat:
-      @"Failed to load private frameworks (CoreSimulator=%p SimulatorKit=%p). dlerror: %s",
-      gCSHandle, gSKHandle, dlerror()]);
+      @"Failed to load private frameworks (CoreSimulator=%p SimulatorKit=%p AccessibilityPlatformTranslation=%p)."
+      @" CoreSimulator: %@. SimulatorKit: %@. AccessibilityPlatformTranslation: %@.",
+      gCSHandle, gSKHandle, gAXHandle,
+      gCSError ?: @"ok", gSKError ?: @"ok", gAXError ?: @"ok"]);
   }
   return ok;
 }
@@ -236,6 +270,9 @@ static NSString *TSTDeveloperDir(void) {
   TSTIndigoMessage *msg = _mouseFn(&a, &b, 0x32, direction, NO);
   if (!msg) return NO;
   size_t size = malloc_size(msg);
+  // We patch bytes up to 0x184+8; refuse to write past a shorter allocation
+  // (a future SimulatorKit could return a smaller multi-touch message).
+  if (size < 0x18C) { free(msg); return NO; }
   char *bytes = (char *)msg;
   memcpy(bytes + 0x3C, &r1.x, sizeof(double));   // finger 1
   memcpy(bytes + 0x44, &r1.y, sizeof(double));
@@ -384,6 +421,10 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
     case '/': *usage = 0x38; return YES;
     case ';': *usage = 0x33; return YES;
     case '\'': *usage = 0x34; return YES;
+    case '[': *usage = 0x2F; return YES;
+    case ']': *usage = 0x30; return YES;
+    case '\\': *usage = 0x31; return YES;
+    case '`': *usage = 0x35; return YES;
     case '!': *usage = 0x1E; *shift = YES; return YES;
     case '@': *usage = 0x1F; *shift = YES; return YES;
     case '#': *usage = 0x20; *shift = YES; return YES;
@@ -398,6 +439,13 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
     case '+': *usage = 0x2E; *shift = YES; return YES;
     case '?': *usage = 0x38; *shift = YES; return YES;
     case ':': *usage = 0x33; *shift = YES; return YES;
+    case '"': *usage = 0x34; *shift = YES; return YES;
+    case '{': *usage = 0x2F; *shift = YES; return YES;
+    case '}': *usage = 0x30; *shift = YES; return YES;
+    case '|': *usage = 0x31; *shift = YES; return YES;
+    case '~': *usage = 0x35; *shift = YES; return YES;
+    case '<': *usage = 0x36; *shift = YES; return YES;
+    case '>': *usage = 0x37; *shift = YES; return YES;
     default: return NO;
   }
 }
@@ -407,32 +455,126 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   TSTIndigoMessage *m = _keyboardFn(usage, down ? TST_BUTTON_TYPE_DOWN : TST_BUTTON_TYPE_UP);
   if (!m) return NO;
   size_t size = malloc_size(m);
+  if (size < sizeof(TSTIndigoMessage)) { free(m); return NO; }
   BOOL ok = [self sendMessage:m size:size wait:NO];
   free(m);
   return ok;
 }
 
 - (BOOL)typeText:(NSString *)text error:(NSError **)error {
-  if (!_keyboardFn) { if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable"); return NO; }
-  for (NSUInteger i = 0; i < text.length; i++) {
-    unichar c = [text characterAtIndex:i];
-    int usage; BOOL shift;
-    if (!TSTUsageForChar(c, &usage, &shift)) continue;
+  return [self typeText:text skippedOut:NULL error:error] != nil;
+}
+
+- (nullable NSString *)typeText:(NSString *)text
+                     skippedOut:(NSString * _Nullable * _Nullable)skipped
+                          error:(NSError **)error {
+  if (skipped) *skipped = nil;
+  if (!_keyboardFn) { if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable"); return nil; }
+  NSMutableString *typed = [NSMutableString string];
+  NSMutableString *missed = [NSMutableString string];
+  // Iterate composed sequences so emoji/combining marks are reported whole
+  // instead of being split into lone surrogates.
+  [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                           options:NSStringEnumerationByComposedCharacterSequences
+                        usingBlock:^(NSString *sub, NSRange r, NSRange er, BOOL *stop) {
+    int usage = 0; BOOL shift = NO;
+    if (sub.length != 1 || !TSTUsageForChar([sub characterAtIndex:0], &usage, &shift)) {
+      [missed appendString:sub];
+      return;
+    }
     if (shift) { [self sendKeyUsage:0xE1 down:YES]; usleep(6 * 1000); }
     [self sendKeyUsage:usage down:YES];
     usleep(9 * 1000);
     [self sendKeyUsage:usage down:NO];
     usleep(5 * 1000);
     if (shift) { [self sendKeyUsage:0xE1 down:NO]; usleep(6 * 1000); }
+    [typed appendString:sub];
+  }];
+  if (skipped && missed.length) *skipped = [missed copy];
+  return [typed copy];
+}
+
+- (BOOL)pressKeyUsage:(int)usage error:(NSError **)error {
+  return [self pressKeyUsage:usage modifiers:0 error:error];
+}
+
+- (BOOL)pressKeyUsage:(int)usage modifiers:(int)modifierMask error:(NSError **)error {
+  if (!_keyboardFn) { if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable"); return NO; }
+  // Bit 0 ctrl, 1 shift, 2 alt, 3 cmd — left-hand usages on the keyboard page.
+  static const int kModUsages[4] = {0xE0, 0xE1, 0xE2, 0xE3};
+  int held[4]; int n = 0;
+  for (int i = 0; i < 4; i++) {
+    if (modifierMask & (1 << i)) {
+      held[n++] = kModUsages[i];
+      [self sendKeyUsage:kModUsages[i] down:YES];
+      usleep(6 * 1000);
+    }
+  }
+  [self sendKeyUsage:usage down:YES];
+  usleep(9 * 1000);
+  [self sendKeyUsage:usage down:NO];
+  usleep(5 * 1000);
+  for (int i = n - 1; i >= 0; i--) {   // release in reverse order
+    [self sendKeyUsage:held[i] down:NO];
+    usleep(6 * 1000);
   }
   return YES;
 }
 
-- (BOOL)pressKeyUsage:(int)usage error:(NSError **)error {
+#pragma mark - Hardware buttons
+
+// A hardware button rides the same envelope as a keyboard key: eventType 1
+// (button), payload eventKind 2, and a TSTIndigoButton whose eventSource names
+// the button and whose eventTarget is 0x33 (hardware) rather than 0x64
+// (keyboard). We take a keyboard message as the template so Apple's own code
+// fills the mach header / magic fields, then repoint it at the hardware target.
+- (BOOL)sendButtonSource:(unsigned int)source down:(BOOL)down {
+  if (!_keyboardFn) return NO;
+  int dir = down ? TST_BUTTON_TYPE_DOWN : TST_BUTTON_TYPE_UP;
+  TSTIndigoMessage *m = _keyboardFn(0, dir);
+  if (!m) return NO;
+  size_t size = malloc_size(m);
+  if (size < sizeof(TSTIndigoMessage)) { free(m); return NO; }
+  m->eventType = TST_INDIGO_EVENTTYPE_BUTTON;
+  m->payload.field1 = 2;  // eventKind = button
+  m->payload.timestamp = mach_absolute_time();
+  m->payload.event.button.eventSource = source;
+  m->payload.event.button.eventType = (unsigned int)dir;
+  m->payload.event.button.eventTarget = TST_BUTTON_TARGET_HARDWARE;
+  m->payload.event.button.keyCode = 0;
+  BOOL ok = [self sendMessage:m size:size wait:NO];
+  free(m);
+  return ok;
+}
+
+- (BOOL)pressButton:(NSString *)name error:(NSError **)error {
   if (!_keyboardFn) { if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable"); return NO; }
-  [self sendKeyUsage:usage down:YES];
-  usleep(9 * 1000);
-  [self sendKeyUsage:usage down:NO];
+  static NSDictionary<NSString *, NSNumber *> *sources;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    sources = @{
+      @"home":      @(TST_BUTTON_SOURCE_HOME),
+      @"lock":      @(TST_BUTTON_SOURCE_LOCK),
+      @"power":     @(TST_BUTTON_SOURCE_LOCK),
+      @"side":      @(TST_BUTTON_SOURCE_SIDE),
+      @"siri":      @(TST_BUTTON_SOURCE_SIRI),
+      @"apple-pay": @(TST_BUTTON_SOURCE_APPLE_PAY),
+      @"applepay":  @(TST_BUTTON_SOURCE_APPLE_PAY),
+    };
+  });
+  NSNumber *src = sources[name.lowercaseString];
+  if (!src) {
+    if (error) *error = TSTMakeError(12, [NSString stringWithFormat:
+      @"unknown button '%@' (want home, lock, side, siri or apple-pay)", name]);
+    return NO;
+  }
+  unsigned int source = src.unsignedIntValue;
+  if (![self sendButtonSource:source down:YES]) {
+    if (error) *error = TSTMakeError(13, @"could not build button event");
+    return NO;
+  }
+  usleep(50 * 1000);
+  [self sendButtonSource:source down:NO];
   return YES;
 }
 
@@ -448,7 +590,11 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
     result = [self walkAccessibilityTree:&err];
     dispatch_semaphore_signal(sem);
   });
-  dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+  // Never block forever: a wedged simulator would hang the daemon for good.
+  if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, TSTAXWaitSeconds * NSEC_PER_SEC)) != 0) {
+    if (error) *error = TSTMakeError(24, @"accessibility walk timed out — simulator unresponsive?");
+    return nil;
+  }
   if (!result && error) *error = err;
   return result;
 }
@@ -460,6 +606,7 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
     if (error) *error = TSTMakeError(20, @"AXPTranslator unavailable");
     return nil;
   }
+  [self beginWalk];
   NSString *token = [NSUUID UUID].UUIDString;
   [disp registerToken:token device:_device];
 
@@ -502,7 +649,31 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
   [self serializeElement:element token:token depth:0 into:out];
   [disp unregisterToken:token];
+  // Tell the caller the tree is partial rather than silently reporting a
+  // half-read screen as the whole screen.
+  if (_walkTruncated) {
+    [out addObject:@{@"role": @"AXTruncated", @"label": @"tree truncated (deadline)"}];
+  }
   return out;
+}
+
+#pragma mark - Walk deadline
+
+// Arm the per-walk deadline and clear the bridge's timeout flag. Called on the
+// _axQueue at the start of every tree walk / element search.
+- (void)beginWalk {
+  _walkDeadline = CFAbsoluteTimeGetCurrent() + TSTAXWalkDeadline;
+  _walkTruncated = NO;
+  [[TSTAXDispatcher shared] resetRequestTimeout];
+}
+
+// YES once we must stop descending: either the wall-clock deadline passed or a
+// bridged AX read timed out (each further read would cost another 10 s).
+- (BOOL)walkShouldStop {
+  if (_walkTruncated) return YES;
+  if (CFAbsoluteTimeGetCurrent() > _walkDeadline) { _walkTruncated = YES; return YES; }
+  if ([TSTAXDispatcher shared].lastRequestTimedOut) { _walkTruncated = YES; return YES; }
+  return NO;
 }
 
 #pragma mark - Set value (universal text)
@@ -516,6 +687,7 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
     TSTAXDispatcher *disp = [TSTAXDispatcher shared];
     id translator = [disp translator];
     if (!translator) { err = TSTMakeError(20, @"AXPTranslator unavailable"); dispatch_semaphore_signal(sem); return; }
+    [self beginWalk];
     NSString *token = [NSUUID UUID].UUIDString;
     [disp registerToken:token device:self->_device];
     id root = [(id<TSTAXPTranslator>)translator frontmostApplicationWithDisplayId:0 bridgeDelegateToken:token];
@@ -530,20 +702,26 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
           [(id<TSTAXPElement>)match setAccessibilityValue:value];
           ok = YES;
         } else {
-          err = TSTMakeError(23, @"element not found for setValue");
+          err = self->_walkTruncated
+            ? TSTMakeError(24, @"accessibility walk timed out — simulator unresponsive?")
+            : TSTMakeError(23, @"element not found for setValue");
         }
       }
     }
     [disp unregisterToken:token];
     dispatch_semaphore_signal(sem);
   });
-  dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+  if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, TSTAXWaitSeconds * NSEC_PER_SEC)) != 0) {
+    if (error) *error = TSTMakeError(24, @"accessibility walk timed out — simulator unresponsive?");
+    return NO;
+  }
   if (!ok && error) *error = err;
   return ok;
 }
 
 - (id)findElement:(id)element token:(NSString *)token identifier:(NSString *)identifier label:(NSString *)label depth:(int)depth {
   if (depth > 60) return nil;
+  if ([self walkShouldStop]) return nil;
   id<NSAccessibility> ax = (id<NSAccessibility>)element;
   id tr = [(id<TSTAXPElement>)element translation];
   if (tr) [(id<TSTAXPTranslationObject>)tr setBridgeDelegateToken:token];
@@ -645,6 +823,8 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
 
 - (void)serializeElement:(id)element token:(NSString *)token depth:(int)depth into:(NSMutableArray *)out {
   if (depth > 60 || out.count > 3000) return;
+  // Bail out of a hung/slow tree instead of walking it to the end.
+  if ([self walkShouldStop]) return;
   id<NSAccessibility> ax = (id<NSAccessibility>)element;
   id<TSTAXPElement> axp = (id<TSTAXPElement>)element;
 
@@ -691,12 +871,18 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   BOOL payloadOK = (sizeof(TSTIndigoPayload) == 0x90);
   BOOL messageOK = (sizeof(TSTIndigoMessage) == 0xB0);
   BOOL touchOK   = (sizeof(TSTIndigoMessage) + sizeof(TSTIndigoPayload) == 0x140);
+  // Button payload sits at message+0x30, same slot the touch payload starts in.
+  BOOL buttonOK  = (offsetof(TSTIndigoMessage, payload.event.button.eventSource) == 0x30 &&
+                    offsetof(TSTIndigoMessage, payload.event.button.eventType) == 0x34 &&
+                    offsetof(TSTIndigoMessage, payload.event.button.eventTarget) == 0x38 &&
+                    offsetof(TSTIndigoMessage, payload.event.button.keyCode) == 0x3c);
   return [NSString stringWithFormat:
-    @"Indigo layout: payload=0x%zx(%@) message=0x%zx(%@) touchMsg=0x%zx(%@) touch=0x%zx",
+    @"Indigo layout: payload=0x%zx(%@) message=0x%zx(%@) touchMsg=0x%zx(%@) touch=0x%zx button=0x%zx(%@)",
     sizeof(TSTIndigoPayload), payloadOK ? @"OK" : @"BAD",
     sizeof(TSTIndigoMessage), messageOK ? @"OK" : @"BAD",
     sizeof(TSTIndigoMessage) + sizeof(TSTIndigoPayload), touchOK ? @"OK" : @"BAD",
-    sizeof(TSTIndigoTouch)];
+    sizeof(TSTIndigoTouch),
+    sizeof(TSTIndigoButton), buttonOK ? @"OK" : @"BAD"];
 }
 
 @end

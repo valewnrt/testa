@@ -16,6 +16,7 @@
   dispatch_queue_t _callbackQueue;
   id _translator;
 }
+@property (atomic, readwrite) BOOL lastRequestTimedOut;
 @end
 
 @implementation TSTAXDispatcher
@@ -54,6 +55,10 @@
   @synchronized (_tokenToDevice) { [_tokenToDevice removeObjectForKey:token]; }
 }
 
+- (void)resetRequestTimeout {
+  self.lastRequestTimedOut = NO;
+}
+
 #pragma mark AXPTranslationTokenDelegateHelper
 
 // Returns a block ^AXPTranslatorResponse *(AXPTranslatorRequest *). Because the
@@ -68,6 +73,7 @@
       return [(id<TSTAXPResponseClass>)objc_getClass("AXPTranslatorResponse") emptyResponse];
     };
   }
+  __weak TSTAXDispatcher *weakSelf = self;
   return ^id(id axRequest) {
     dispatch_group_t group = dispatch_group_create();
     dispatch_group_enter(group);
@@ -78,8 +84,11 @@
       response = innerResponse;
       dispatch_group_leave(group);
     }];
-    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
-    if (!response) {
+    long waited = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+    if (waited != 0 || !response) {
+      // The simulator did not answer. Flag it so the caller can stop walking:
+      // once one read times out, the rest almost always will too.
+      weakSelf.lastRequestTimedOut = YES;
       response = [(id<TSTAXPResponseClass>)objc_getClass("AXPTranslatorResponse") emptyResponse];
     }
     return response;

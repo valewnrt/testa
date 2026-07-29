@@ -51,8 +51,29 @@ NS_ASSUME_NONNULL_BEGIN
 /// Type a string via the hardware keyboard (the focused field receives it).
 - (BOOL)typeText:(NSString *)text error:(NSError **)error NS_SWIFT_NAME(type(_:));
 
+/// Type a string, reporting what the HID keyboard could not represent.
+/// Returns the text actually typed (nil only on failure, with `error` set);
+/// `skipped` receives every character that has no US-keyboard usage code
+/// (emoji, accents, CJK …), or nil when everything was typed. Use
+/// -setAccessibilityValue:forIdentifier:label:error: for those.
+- (nullable NSString *)typeText:(NSString *)text
+                     skippedOut:(NSString * _Nullable * _Nullable)skipped
+                          error:(NSError **)error
+    NS_SWIFT_NAME(type(_:skipped:));
+
 /// Press a single HID usage key (e.g. 0x2A backspace, 0x28 return).
 - (BOOL)pressKeyUsage:(int)usage error:(NSError **)error NS_SWIFT_NAME(pressKey(usage:));
+
+/// Press a key with modifiers held down (Cmd+A, Cmd+V, Ctrl+C …).
+/// `modifierMask` bits: 0 = left-ctrl, 1 = left-shift, 2 = left-alt, 3 = left-cmd.
+/// Modifiers go down in that order and are released in reverse.
+- (BOOL)pressKeyUsage:(int)usage modifiers:(int)modifierMask error:(NSError **)error
+    NS_SWIFT_NAME(pressKey(usage:modifiers:));
+
+/// Press a hardware button: @"home", @"lock" (aka @"power"/@"side"), @"siri"
+/// or @"apple-pay". Down, 50 ms, up.
+- (BOOL)pressButton:(NSString *)name error:(NSError **)error
+    NS_SWIFT_NAME(pressButton(_:));
 
 /// Pinch at center (x,y). scale>1 zooms in, scale<1 zooms out.
 - (BOOL)pinchAtX:(double)x y:(double)y scale:(double)scale duration:(double)duration error:(NSError **)error
@@ -64,6 +85,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Flattened accessibility tree of the frontmost app. Each element dict has:
 /// role, label, id, value, x, y, w, h, enabled, traits, depth.
+/// The walk is bounded (25 s, and it aborts as soon as a bridged read times
+/// out); if it was cut short, a final `{role: AXTruncated}` marker is appended.
+/// Returns nil with an error if the simulator never answered at all.
 - (nullable NSArray<NSDictionary<NSString *, id> *> *)accessibilityTreeWithError:(NSError **)error
     NS_SWIFT_NAME(accessibilityTree());
 
