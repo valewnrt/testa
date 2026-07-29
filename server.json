@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.seizeddev/testa",
+  "description": "Drive the iOS Simulator from an agent: read the screen, tap/type/swipe, replay flows in CI.",
+  "version": "0.2.0",
+  "status": "active",
+  "websiteUrl": "https://github.com/seizeddev/testa",
+  "repository": {
+    "url": "https://github.com/seizeddev/testa",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@seizeddev/testa-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "TESTA_MCP_FULL",
+          "description": "Set to 1 to expose all 40 tools instead of the 13-tool token-lean default.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "0"
+        },
+        {
+          "name": "TESTA_UDID",
+          "description": "Target a specific simulator UDID instead of the booted one.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.github.seizeddev/testa": {
+      "note": "The npm package is a thin launcher only. It requires the macOS-native `testa` binary on PATH: `brew tap seizeddev/testa https://github.com/seizeddev/testa && brew install seizeddev/testa/testa`. Once installed, `testa mcp` is itself a stdio MCP server and can be registered directly without npm.",
+      "platforms": ["darwin"],
+      "requires": ["macOS", "Xcode 26 (iOS 26 simulator runtimes)"]
+    }
+  }
+}

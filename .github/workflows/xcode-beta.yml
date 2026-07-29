@@ -1,0 +1,116 @@
+name: Xcode beta
+
+# Testa dlopens Apple's private simulator frameworks (SimulatorKit's Indigo HID
+# wire format, AXPTranslator). Those are the parts a new Xcode can move without
+# notice, so this job runs against *every* Xcode installed on the runner —
+# including betas — on a schedule, not just against whatever CI happens to pick.
+#
+# `testa layout` is the canary: it re-derives the Indigo struct offsets from the
+# live framework and fails if a field moved. When this workflow goes red before
+# a new Xcode ships publicly, there is time to fix it before anyone is broken.
+
+on:
+  schedule:
+    # Mondays, 05:00 UTC.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      xcode:
+        description: "Only test this Xcode app name (e.g. Xcode_26.4). Empty = all installed."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xcode-beta
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: discover Xcodes
+    runs-on: macos-latest
+    outputs:
+      xcodes: ${{ steps.list.outputs.xcodes }}
+    steps:
+      - name: List every Xcode on the runner
+        id: list
+        env:
+          ONLY: ${{ inputs.xcode }}
+        run: |
+          set -euo pipefail
+          ls -1 /Applications | grep -E '^Xcode.*\.app$' || true
+          XCODES=$(ls -1 /Applications \
+            | grep -E '^Xcode.*\.app$' \
+            | sed 's/\.app$//' \
+            | { if [ -n "$ONLY" ]; then grep -Fx "$ONLY"; else cat; fi; } \
+            | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "xcodes=$XCODES"
+          echo "xcodes=$XCODES" >> "$GITHUB_OUTPUT"
+
+  xcode-beta:
+    # Badge-ready job name. One run per installed Xcode, betas included.
+    name: xcode-beta (${{ matrix.xcode }})
+    needs: discover
+    if: needs.discover.outputs.xcodes != '[]'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        xcode: ${{ fromJSON(needs.discover.outputs.xcodes) }}
+    steps:
+      # actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Select ${{ matrix.xcode }}
+        env:
+          XCODE: ${{ matrix.xcode }}
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "/Applications/$XCODE.app"
+          xcodebuild -version
+          swift --version
+
+      - name: swift build
+        run: swift build -c release
+
+      - name: swift test
+        run: swift test
+
+      # The self-check that matters: private-framework struct layout.
+      - name: testa layout (Indigo struct self-check)
+        run: ./.build/release/testa layout
+
+      - name: Boot a simulator
+        id: boot
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys;d=json.load(sys.stdin);print([v['udid'] for vs in d['devices'].values() for v in vs if 'iPhone' in v['name']][0])")
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Smoke flow
+        if: steps.boot.outcome == 'success'
+        env:
+          UDID: ${{ steps.boot.outputs.udid }}
+        run: |
+          set -euo pipefail
+          examples/native/build.sh
+          ./.build/release/testa --udid "$UDID" flow run examples/native/smoke.flow \
+            --junit testa-results.xml \
+            --artifacts testa-artifacts
+
+      - name: Upload artifacts
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: xcode-beta-${{ matrix.xcode }}
+          path: |
+            testa-results.xml
+            testa-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

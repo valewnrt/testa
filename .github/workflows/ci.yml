@@ -9,7 +9,8 @@ jobs:
   build:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Select latest Xcode
         run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
@@ -23,10 +24,26 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
+      - name: Unit tests
+        run: swift test
+
       - name: Smoke — help + layout
         run: |
           ./.build/release/testa help
+          ./.build/release/testa version
+          # `layout` re-derives the Indigo HID struct offsets from the running
+          # SimulatorKit and fails loudly if Apple moved a field. This is the
+          # canary for a new Xcode breaking the private-framework path.
           ./.build/release/testa layout
+
+      - name: Manifests are valid
+        run: |
+          python3 -m json.tool .claude-plugin/plugin.json > /dev/null
+          python3 -m json.tool .mcp.json > /dev/null
+          python3 -m json.tool server.json > /dev/null
+          python3 -m json.tool npm/package.json > /dev/null
+          node --check npm/bin/testa-mcp.js
+          ruby -ryaml -e 'YAML.load_file("action.yml")'
 
       # Best-effort live smoke: boot a simulator and connect. Non-fatal because
       # CI simulators occasionally fail to expose the accessibility bridge.
@@ -38,3 +55,54 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
           ./.build/release/testa --udid "$UDID" info
           ./.build/release/testa --udid "$UDID" ui | head -5
+
+  # The credibility job: build the SwiftUI showcase, install it, and replay the
+  # committed smoke flow end-to-end. If this is green, `testa flow run` really
+  # drives a real simulator on a clean machine — which is the whole promise.
+  e2e:
+    name: e2e (smoke.flow)
+    runs-on: macos-15
+    steps:
+      # actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build testa
+        run: swift build -c release
+
+      - name: Boot simulator
+        id: boot
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys;d=json.load(sys.stdin);print([v['udid'] for vs in d['devices'].values() for v in vs if 'iPhone' in v['name']][0])")
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+      # No Xcode project involved: build.sh compiles Showcase.swift straight to a
+      # simulator .app with swiftc and installs it. Takes seconds, not minutes.
+      - name: Build + install the showcase app
+        # build.sh targets `booted`, which is the sim booted in the step above —
+        # it is the only one running on a fresh runner.
+        run: examples/native/build.sh
+
+      - name: Replay smoke.flow
+        run: |
+          ./.build/release/testa --udid '${{ steps.boot.outputs.udid }}' \
+            flow run examples/native/smoke.flow \
+            --junit testa-results.xml \
+            --artifacts testa-artifacts
+
+      - name: Upload failure artifacts
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: e2e-artifacts
+          path: |
+            testa-results.xml
+            testa-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

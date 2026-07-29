@@ -1,0 +1,129 @@
+name: "Testa iOS E2E"
+description: >-
+  Run Testa .flow files against an iOS Simulator and publish JUnit results plus
+  failure artifacts (screenshot, accessibility tree, OCR, logs, crash reports).
+author: "Valentin Weinert"
+
+branding:
+  icon: smartphone
+  color: purple
+
+inputs:
+  flows:
+    description: >-
+      Flow files to run. A glob (expanded by the shell) or a space-separated
+      list of paths.
+    required: false
+    default: "**/*.flow"
+  device:
+    description: >-
+      Simulator to boot and drive, by device name (e.g. "iPhone 17 Pro") or
+      UDID. Must exist in `xcrun simctl list devices available`.
+    required: false
+    default: "iPhone 17 Pro"
+  install:
+    description: >-
+      How to obtain testa: "brew" (tap + install, builds from source) or
+      "source" (swift build -c release from the checked-out repo — use this when
+      the workflow checks out testa itself).
+    required: false
+    default: "brew"
+  artifact-name:
+    description: "Name of the uploaded artifact bundle."
+    required: false
+    default: "testa-artifacts"
+
+outputs:
+  junit:
+    description: "Path to the JUnit XML report."
+    value: ${{ steps.run.outputs.junit }}
+  udid:
+    description: "UDID of the simulator the flows ran against."
+    value: ${{ steps.boot.outputs.udid }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install testa (Homebrew)
+      if: inputs.install == 'brew'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v testa >/dev/null 2>&1; then
+          echo "testa already on PATH: $(testa version)"
+          exit 0
+        fi
+        brew tap seizeddev/testa https://github.com/seizeddev/testa
+        brew install seizeddev/testa/testa
+        testa version
+
+    - name: Build testa from source
+      if: inputs.install == 'source'
+      shell: bash
+      run: |
+        set -euo pipefail
+        swift build -c release
+        BIN="$(swift build -c release --show-bin-path)"
+        echo "$BIN" >> "$GITHUB_PATH"
+        "$BIN/testa" version
+
+    - name: Boot simulator
+      id: boot
+      shell: bash
+      # Inputs go through the environment, never through shell interpolation.
+      env:
+        DEVICE: ${{ inputs.device }}
+      run: |
+        set -euo pipefail
+        UDID="$(xcrun simctl list devices available -j | python3 -c '
+        import json, os, sys
+        want = os.environ["DEVICE"]
+        devices = [d for runtime in json.load(sys.stdin)["devices"].values() for d in runtime]
+        match = [d for d in devices if d["udid"] == want or d["name"] == want]
+        if not match:
+            sys.stderr.write("device not found: %s\navailable:\n%s\n"
+                             % (want, "\n".join("  " + d["name"] for d in devices)))
+            sys.exit(1)
+        print(match[0]["udid"])
+        ')"
+        echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+        xcrun simctl boot "$UDID" || true
+        xcrun simctl bootstatus "$UDID" -b
+        echo "booted $DEVICE ($UDID)"
+
+    - name: Run flows
+      id: run
+      shell: bash
+      env:
+        FLOWS: ${{ inputs.flows }}
+        UDID: ${{ steps.boot.outputs.udid }}
+      run: |
+        set -euo pipefail
+        shopt -s globstar nullglob
+        # Word-split + glob-expand on purpose: the input may be a glob pattern or
+        # a space-separated list of paths. It comes from the calling workflow,
+        # not from event data.
+        # shellcheck disable=SC2206  # word-splitting + globbing is the point
+        FILES=( $FLOWS )
+        if [ ${#FILES[@]} -eq 0 ]; then
+          echo "::error::no flow files matched: $FLOWS"
+          exit 1
+        fi
+        printf 'running %d flow(s):\n' "${#FILES[@]}"
+        printf '  %s\n' "${FILES[@]}"
+        echo "junit=testa-results.xml" >> "$GITHUB_OUTPUT"
+        testa --udid "$UDID" flow run "${FILES[@]}" \
+          --junit testa-results.xml \
+          --artifacts testa-artifacts
+
+    - name: Upload results and failure artifacts
+      if: always()
+      # actions/upload-artifact v4.6.2
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          testa-results.xml
+          testa-artifacts/
+        if-no-files-found: ignore
+        retention-days: 14

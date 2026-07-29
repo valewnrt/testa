@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "testa": {
+      "command": "testa",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}

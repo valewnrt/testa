@@ -1,0 +1,25 @@
+{
+  "name": "testa",
+  "version": "0.2.0",
+  "description": "Drive the iOS Simulator like a human, from an agent: read the screen via the accessibility tree or on-device OCR, tap/type/swipe/pinch/rotate/drag-drop with real HID events, control the device environment (push, location, biometry, appearance), and replay saved .flow files deterministically in CI. Bundles the testa skill and the testa MCP server.",
+  "author": {
+    "name": "Valentin Weinert",
+    "url": "https://github.com/seizeddev"
+  },
+  "homepage": "https://github.com/seizeddev/testa",
+  "repository": "https://github.com/seizeddev/testa",
+  "license": "MIT",
+  "keywords": [
+    "ios",
+    "simulator",
+    "e2e",
+    "testing",
+    "qa",
+    "accessibility",
+    "ocr",
+    "swiftui",
+    "react-native",
+    "expo",
+    "mcp"
+  ]
+}
