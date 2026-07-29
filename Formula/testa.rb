@@ -1,6 +1,6 @@
 # Homebrew formula for Testa. Builds from source, so no notarized binary is
 # needed. Install via the tap (Homebrew 2.x+ no longer accepts a raw formula URL):
-#   brew tap valewnrt/testa https://github.com/valewnrt/testa
+#   brew tap valewnrt/testa
 #   brew install valewnrt/testa/testa
 #
 # Release checklist for each tag (there is no automation for this — release.sh

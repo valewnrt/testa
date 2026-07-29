@@ -98,8 +98,8 @@ loop and the token-free CI replay. Corrections welcome — open an issue.</sub>
 
 ```bash
 # Install — builds from source, installs the skill, registers the MCP server
-brew tap valewnrt/testa https://github.com/valewnrt/testa
-brew install valewnrt/testa/testa
+brew tap valewnrt/testa
+brew install testa
 testa setup
 
 # …or from source
