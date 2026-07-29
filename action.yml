@@ -53,8 +53,8 @@ runs:
           echo "testa already on PATH: $(testa version)"
           exit 0
         fi
-        brew tap seizeddev/testa https://github.com/seizeddev/testa
-        brew install seizeddev/testa/testa
+        brew tap valewnrt/testa https://github.com/valewnrt/testa
+        brew install valewnrt/testa/testa
         testa version
 
     - name: Build testa from source

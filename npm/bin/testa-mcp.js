@@ -19,20 +19,20 @@ const INSTALL_HINT = [
   '',
   'Install it with Homebrew (builds from source, no notarized binary needed):',
   '',
-  '  brew tap seizeddev/testa https://github.com/seizeddev/testa',
-  '  brew install seizeddev/testa/testa',
+  '  brew tap valewnrt/testa https://github.com/valewnrt/testa',
+  '  brew install valewnrt/testa/testa',
   '  testa setup',
   '',
   '…or from source:',
   '',
-  '  git clone https://github.com/seizeddev/testa && cd testa && ./install.sh',
+  '  git clone https://github.com/valewnrt/testa && cd testa && ./install.sh',
   '',
   'Once `testa` is on your PATH, `testa mcp` is itself a stdio MCP server —',
   'you can register it directly and skip this npm package entirely:',
   '',
   '  claude mcp add testa -- testa mcp',
   '',
-  'Docs: https://github.com/seizeddev/testa',
+  'Docs: https://github.com/valewnrt/testa',
 ].join('\n');
 
 function isExecutableFile(candidate) {
@@ -82,7 +82,7 @@ function main() {
     process.exit(1);
   }
 
-  // Everything after our own argv is passed through, so `npx @seizeddev/testa-mcp --full`
+  // Everything after our own argv is passed through, so `npx @valewnrt/testa-mcp --full`
   // and `--udid <udid>` work exactly as they do on the CLI.
   const child = spawn(bin, ['mcp', ...process.argv.slice(2)], { stdio: 'inherit' });
 

@@ -1,5 +1,5 @@
 {
-  "name": "@seizeddev/testa-mcp",
+  "name": "@valewnrt/testa-mcp",
   "version": "0.2.0",
   "description": "npx launcher for the Testa MCP server (iOS Simulator E2E driver for AI agents). Requires the native `testa` binary — install it with Homebrew.",
   "keywords": [
@@ -11,17 +11,17 @@
     "agent",
     "testa"
   ],
-  "homepage": "https://github.com/seizeddev/testa",
+  "homepage": "https://github.com/valewnrt/testa",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seizeddev/testa.git",
+    "url": "git+https://github.com/valewnrt/testa.git",
     "directory": "npm"
   },
   "bugs": {
-    "url": "https://github.com/seizeddev/testa/issues"
+    "url": "https://github.com/valewnrt/testa/issues"
   },
   "license": "MIT",
-  "author": "Valentin Weinert (https://github.com/seizeddev)",
+  "author": "Valentin Weinert (https://github.com/valewnrt)",
   "type": "commonjs",
   "bin": {
     "testa-mcp": "bin/testa-mcp.js"
@@ -36,5 +36,5 @@
   "engines": {
     "node": ">=18"
   },
-  "mcpName": "io.github.seizeddev/testa"
+  "mcpName": "io.github.valewnrt/testa"
 }

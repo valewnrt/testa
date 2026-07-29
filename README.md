@@ -9,8 +9,8 @@ Real HID touches (every gesture), screen reading via the accessibility tree
 Test React Native / Expo and native SwiftUI apps end-to-end — **without adding a
 single `testID`** — then save the run as a flow file and let CI replay it for free.
 
-[![CI](https://github.com/seizeddev/testa/actions/workflows/ci.yml/badge.svg)](https://github.com/seizeddev/testa/actions/workflows/ci.yml)
-[![Xcode beta](https://github.com/seizeddev/testa/actions/workflows/xcode-beta.yml/badge.svg)](https://github.com/seizeddev/testa/actions/workflows/xcode-beta.yml)
+[![CI](https://github.com/valewnrt/testa/actions/workflows/ci.yml/badge.svg)](https://github.com/valewnrt/testa/actions/workflows/ci.yml)
+[![Xcode beta](https://github.com/valewnrt/testa/actions/workflows/xcode-beta.yml/badge.svg)](https://github.com/valewnrt/testa/actions/workflows/xcode-beta.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20·%20iOS%2026-lightgrey)
 ![Swift](https://img.shields.io/badge/swift-6-orange.svg)
@@ -98,12 +98,12 @@ loop and the token-free CI replay. Corrections welcome — open an issue.</sub>
 
 ```bash
 # Install — builds from source, installs the skill, registers the MCP server
-brew tap seizeddev/testa https://github.com/seizeddev/testa
-brew install seizeddev/testa/testa
+brew tap valewnrt/testa https://github.com/valewnrt/testa
+brew install valewnrt/testa/testa
 testa setup
 
 # …or from source
-git clone https://github.com/seizeddev/testa && cd testa && ./install.sh
+git clone https://github.com/valewnrt/testa && cd testa && ./install.sh
 ```
 
 ```bash
@@ -260,7 +260,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: xcodebuild -scheme MyApp -sdk iphonesimulator -derivedDataPath dd build
-      - uses: seizeddev/testa@v0.2.0
+      - uses: valewnrt/testa@v0.2.0
         with:
           flows: "e2e/**/*.flow"
           device: "iPhone 17 Pro"
@@ -334,7 +334,7 @@ own screenshot.
   + [`.mcp.json`](.mcp.json)), so it can be added as a marketplace entry that
   brings both the skill and the MCP server.
 - **Any MCP client** (Codex, Cursor, …) — `claude mcp add testa -- testa mcp`,
-  or `npx @seizeddev/testa-mcp` (a thin launcher; it downloads nothing and needs
+  or `npx @valewnrt/testa-mcp` (a thin launcher; it downloads nothing and needs
   `testa` installed).
 - **13 tools by default** — `ui, see, find, tap, tapText, type, setValue, swipe,
   scrollTo, wait, assert, launch, screenshot`. That is everything needed to
@@ -484,7 +484,7 @@ bench/bench.sh                                # token benchmark on the booted si
 - The prebuilt binary isn't notarized unless built with your own Apple Developer
   ID (`release.sh`); the `clone` and Homebrew paths build from source.
 - `testa record` produces H.264 MP4; live FPS streaming isn't implemented.
-- The npm package `@seizeddev/testa-mcp` is a **launcher only** — it downloads no
+- The npm package `@valewnrt/testa-mcp` is a **launcher only** — it downloads no
   binaries. Install `testa` with Homebrew first.
 
 ## Project

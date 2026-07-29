@@ -114,13 +114,13 @@ A device-state suite, all through public `simctl` APIs unless noted:
   showcase and replays `smoke.flow`. All third-party actions are SHA-pinned.
 - **`.claude-plugin/plugin.json` + `.mcp.json`** — the repo works as a Claude
   Code plugin / marketplace entry.
-- **`server.json`** — MCP Registry manifest (`io.github.seizeddev/testa`).
-- **`npm/` → `@seizeddev/testa-mcp`** — a thin `npx` launcher. It is macOS-only,
+- **`server.json`** — MCP Registry manifest (`io.github.valewnrt/testa`).
+- **`npm/` → `@valewnrt/testa-mcp`** — a thin `npx` launcher. It is macOS-only,
   has no dependencies, and **downloads nothing**: it locates an installed `testa`
   and execs `testa mcp`, or prints the Homebrew install instructions and exits 1.
 - **`bench/`** — reproducible token benchmark with a documented method.
 - Homebrew: the formula is now installed via a **tap**
-  (`brew tap seizeddev/testa https://github.com/seizeddev/testa`). Homebrew has
+  (`brew tap valewnrt/testa https://github.com/valewnrt/testa`). Homebrew has
   not accepted `brew install <raw formula URL>` since 2.x; the README instruction
   was broken and is fixed.
 

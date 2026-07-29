@@ -5,7 +5,7 @@ Thanks for your interest in Testa!
 ## Dev setup
 
 ```bash
-git clone https://github.com/seizeddev/testa && cd testa
+git clone https://github.com/valewnrt/testa && cd testa
 make build      # debug build
 make test       # unit tests (swift test)
 ```

@@ -1,20 +1,20 @@
 # Homebrew formula for Testa. Builds from source, so no notarized binary is
 # needed. Install via the tap (Homebrew 2.x+ no longer accepts a raw formula URL):
-#   brew tap seizeddev/testa https://github.com/seizeddev/testa
-#   brew install seizeddev/testa/testa
+#   brew tap valewnrt/testa https://github.com/valewnrt/testa
+#   brew install valewnrt/testa/testa
 #
 # Release checklist for each tag (there is no automation for this — release.sh
 # only builds/signs the standalone zip, it does not rewrite this file):
 #   1. git tag vX.Y.Z && git push --tags
-#   2. curl -sL https://github.com/seizeddev/testa/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+#   2. curl -sL https://github.com/valewnrt/testa/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
 #   3. paste that digest into `sha256` below and commit
 class Testa < Formula
   desc "Autonomous iOS Simulator E2E driver for AI agents"
-  homepage "https://github.com/seizeddev/testa"
-  url "https://github.com/seizeddev/testa/archive/refs/tags/v0.2.0.tar.gz"
+  homepage "https://github.com/valewnrt/testa"
+  url "https://github.com/valewnrt/testa/archive/refs/tags/v0.2.0.tar.gz"
   sha256 "29498608de6d3784c8e001df6074132529623da7ac841d0d42f9b9808d255fad"
   license "MIT"
-  head "https://github.com/seizeddev/testa.git", branch: "main"
+  head "https://github.com/valewnrt/testa.git", branch: "main"
 
   depends_on xcode: ["26.0", :build]
   depends_on :macos
