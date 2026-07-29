@@ -21,7 +21,8 @@ public struct UIElement {
     /// Short role without the "AX" prefix.
     public var shortRole: String { role.hasPrefix("AX") ? String(role.dropFirst(2)) : role }
 
-    /// Stable identity for diffing across snapshots.
+    /// Stable identity for diffing across snapshots. Deliberately built from the
+    /// RAW label/id — escaping is a rendering concern and must not change identity.
     public var key: String { (id.map { "#\($0)" }) ?? "\(role)|\(label ?? "")" }
 }
 
@@ -40,8 +41,13 @@ public struct Snapshot {
         "AXToggle", "AXStepper", "AXTab",
     ]
 
+    /// Marker role the engine appends when a tree walk was cut short by its deadline.
+    public static let truncatedRole = "AXTruncated"
+
     /// Decide if an element carries information worth showing an agent.
     public static func interesting(role: String, label: String?, id: String?, value: String?, w: Double, h: Double) -> Bool {
+        // The engine's truncation marker has no geometry but must always surface.
+        if role == truncatedRole { return true }
         if w <= 0 || h <= 0 { return false }
         if let id = id, !id.isEmpty { return true }
         if interactableRoles.contains(role) { return true }
@@ -84,11 +90,43 @@ public struct Snapshot {
         self.byRef = map
     }
 
+    /// Labels, ids and values come from the app under test — they are untrusted
+    /// input, not markup. Escape them so a crafted label can never break out of
+    /// its line and forge extra elements (or instructions) in an agent's view:
+    /// backslash/quote/newline/tab become visible escapes, other control
+    /// characters are dropped, and the result is capped at `limit` characters.
+    public static func escaped(_ s: String, limit: Int = 120) -> String {
+        var out = ""
+        out.reserveCapacity(s.unicodeScalars.count + 8)
+        for u in s.unicodeScalars {
+            switch u {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                // C0/C1 controls, DEL and the Unicode line/paragraph separators
+                // all render as breaks somewhere — none may pass through.
+                let v = u.value
+                if v < 0x20 || v == 0x7F || (v >= 0x80 && v <= 0x9F) || v == 0x2028 || v == 0x2029 { continue }
+                out.unicodeScalars.append(u)
+            }
+        }
+        guard out.count > limit else { return out }
+        var cut = String(out.prefix(limit))
+        // Never leave half an escape sequence at the cut point.
+        var trailing = 0
+        for ch in cut.reversed() { if ch == "\\" { trailing += 1 } else { break } }
+        if trailing % 2 == 1 { cut.removeLast() }
+        return cut + "…"
+    }
+
     public func line(_ e: UIElement) -> String {
         var s = "\(e.ref) \(e.shortRole)"
-        if let l = e.label { s += " \"\(l)\"" }
-        if let i = e.id { s += " #\(i)" }
-        if let v = e.value { s += " =\(v)" }
+        if let l = e.label { s += " \"\(Snapshot.escaped(l))\"" }
+        if let i = e.id { s += " #\(Snapshot.escaped(i, limit: 80))" }
+        if let v = e.value { s += " =\(Snapshot.escaped(v))" }
         s += " @\(e.cx),\(e.cy)"
         if !e.enabled { s += " (disabled)" }
         return s
