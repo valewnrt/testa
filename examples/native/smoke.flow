@@ -1,0 +1,36 @@
+# Smoke flow for the native SwiftUI showcase (examples/native/Showcase.swift).
+#
+# Every line is exactly a `testa` command — which is the whole point: an agent
+# explores the app once, `testa flow record save` writes this file, and CI runs
+# `testa flow run examples/native/smoke.flow` forever after with zero tokens.
+#
+# The flow is re-runnable: nothing here depends on how many times it has run.
+
+@name smoke
+@timeout 8000
+@require com.testa.showcase.native
+
+launch com.testa.showcase.native
+wait "#status"                    # the @timeout above is appended automatically
+
+# Tap by accessibility id; the app mirrors every gesture into #status.
+# Selectors match substrings, so "tap:" holds whether it reads tap:1 or tap:9.
+tap "#tapButton"
+assert "tap:" exists
+
+# Text entry. Clear first, then setvalue writes the field outright (typein would
+# append to whatever a previous run left there), so the asserted result is
+# identical on the first run and the hundredth.
+clear "#textInput"
+setvalue "#textInput" hello
+assert #status label=typed:hello
+
+# Device environment: flip the simulator to dark mode and back. App state has to
+# survive the trait change.
+appearance dark
+assert #status label=typed:hello
+appearance light
+
+# A complex gesture, verified through the accessibility tree alone.
+dragdrop "#dragHandle" "#zoneB"
+assert #dropResult "label=dropped on zoneB"

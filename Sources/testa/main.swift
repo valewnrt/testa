@@ -5,6 +5,9 @@ import TestaEngine
 func out(_ s: String) { print(s) }
 func err(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
 
+// A client (or daemon) writing to a closed socket must see EPIPE, not die.
+_ = signal(SIGPIPE, SIG_IGN)
+
 let usage = """
 testa — autonomous iOS Simulator E2E driver for AI agents
 
@@ -14,28 +17,57 @@ testa — autonomous iOS Simulator E2E driver for AI agents
     testa find <query>              elements matching label/id/value/role
     testa scrollto <sel>            scroll until an element is visible
     testa assert <sel> [exists|gone|value=..|label=..]
-    testa wait <sel> [timeoutMs]
-    testa screenshot [path]
+    testa wait <sel> [gone] [timeoutMs]   wait until it appears (or disappears)
+    testa audit                     accessibility audit (labels, 44pt targets, dupes)
+    testa vdiff <baseline.png> [tolerancePct]   visual regression (writes the
+                                    baseline on first run; OCR-aware diff after)
+    testa screenshot [path.png]
 
   Act (sel = eN | #id | "label"; tap falls back to OCR text):
     testa tap <sel> | testa tap <x> <y> | testa tapocr <text>
     testa typein <sel> <text> | testa type <text> | testa setvalue <sel> <text>
     testa clear <sel> | testa key <hidUsage>
-    testa swipe|drag|dragdrop <x1> <y1> <x2> <y2>   (drag/dragdrop also <fromSel> <toSel>)
-    testa longpress <sel|x y> | pinch <sel|x y> <scale> | rotate <sel|x y> <radians>
+    testa swipe|drag|dragdrop <x1> <y1> <x2> <y2> [secs]  (also <fromSel> <toSel>)
+    testa longpress <sel|x y> [secs] | pinch <sel|x y> <scale> [secs]
+    testa rotate <sel|x y> <radians> [secs]
 
   App / device:
     testa devices                   booted simulators
     testa boot <udid|name> | shutdown <udid|all>
-    testa install <app> | launch <bundle> | terminate <bundle> | apps
+    testa install <app> | terminate <bundle> | apps
+    testa launch <bundle> [--env K=V ...] [--args <a> ...]
     testa logs [bundle] [seconds]   recent app console logs
     testa crashes [bundle]          newest crash report, if any
     testa open <url>                open a deep link / universal link
     testa permission <grant|revoke|reset> <service> <bundle>
-    testa record <start [path]|stop>
+    testa record <start [path.mp4]|stop>
+
+  Environment:
+    testa push <bundle> <file.json | '{"aps":{"alert":"hi"}}'>
+    testa location <lat> <lon> | testa location clear
+    testa statusbar time 9:41 [battery 100 charged] [wifi 3] [cell 4] | statusbar clear
+    testa appearance <dark|light> | testa contentsize <size|increment|decrement>
+    testa locale <en_US> [lang]     (apps need a relaunch to pick it up)
+    testa addmedia <file...>        add photos/videos to the library
+    testa pbcopy <text> | testa pbpaste     simulator pasteboard
+    testa biometry <enroll|unenroll|match|nomatch>
+    testa button <home|lock|siri|apple-pay> | testa keycombo <cmd+shift+a>
+
+  Flows / CI (deterministic replay — no agent, no tokens):
+    testa flow run <file.flow ...> [--junit <out.xml>] [--artifacts <dir>] [--quiet]
+    testa flow record start         mark "record from here"
+    testa flow record save <file.flow> [--all]   write what you just did as a flow
+    testa matrix "<dev1,dev2,…>" -- flow run <file.flow ...>   same flow, every device
+
+  A .flow file is one testa command per line (`#` comments, `@name`, `@timeout`,
+  `@require <bundle>`). Exit 0 iff every step passed; failures dump a screenshot,
+  the full tree, OCR, logs and crashes into the artifacts dir.
 
   Target a specific sim with --udid <udid> (default: the booted one).
-  Setup / daemon: testa setup | start | stop | status | info | mcp
+  Setup / daemon: testa setup | start | stop | status | info | mcp | version
+
+  Acting commands answer with the settled UI diff, so a follow-up `ui` is
+  usually unnecessary.
 """
 
 // --- parse a global --udid flag ---
@@ -91,6 +123,14 @@ func requireUDID(_ explicit: String?) -> String {
         err("no booted simulator. Boot one (testa boot <name>) or pass --udid.")
         exit(1)
     }
+    // Picking one of several booted sims silently is how a test ends up driving
+    // the wrong device — say which one we chose.
+    if explicit == nil, ProcessInfo.processInfo.environment["TESTA_UDID"]?.isEmpty != false {
+        let booted = Simctl.bootedDevices()
+        if booted.count > 1, let d = booted.first(where: { $0.udid == u }) {
+            err("multiple booted simulators — using \(d.name) (\(d.udid)); pass --udid to choose")
+        }
+    }
     return u
 }
 
@@ -120,6 +160,9 @@ case "setup":
 
 case "help", "-h", "--help":
     out(usage)
+
+case "version", "--version", "-v":
+    out("testa \(testaVersion)")
 
 case "layout":
     out(TSTSimulator.layoutDescription())
@@ -156,6 +199,12 @@ case "stop":
     let udid = requireUDID(explicitUDID)
     if Client.daemonRunning(udid) { _ = Client.sendOnce(udid, ["stop"]); out("stopped \(udid)") }
     else { out("not running") }
+
+case "flow":
+    FlowCLI.flow(Array(argv.dropFirst()), explicitUDID: explicitUDID)
+
+case "matrix":
+    FlowCLI.matrix(Array(argv.dropFirst()), explicitUDID: explicitUDID)
 
 case "status":
     let udid = requireUDID(explicitUDID)

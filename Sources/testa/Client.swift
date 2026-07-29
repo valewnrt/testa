@@ -9,7 +9,8 @@ enum Client {
         _NSGetExecutablePath(nil, &size)
         var buf = [CChar](repeating: 0, count: Int(size))
         if _NSGetExecutablePath(&buf, &size) == 0 {
-            return (String(cString: buf) as NSString).resolvingSymlinksInPath
+            let p = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+            return (p as NSString).resolvingSymlinksInPath
         }
         let arg0 = CommandLine.arguments[0]
         let abs = (arg0 as NSString).isAbsolutePath
@@ -21,6 +22,9 @@ enum Client {
         let fd = Net.connect(Net.socketPath(udid))
         if fd < 0 { return nil }
         defer { close(fd) }
+        // Generous read budget — scrollto/wait legitimately take tens of seconds —
+        // but never unbounded.
+        Net.setTimeouts(fd, recv: 120, send: 10)
         guard let data = try? JSONSerialization.data(withJSONObject: argv),
               let s = String(data: data, encoding: .utf8) else { return nil }
         Net.writeLine(fd, s)
