@@ -1,6 +1,6 @@
 {
   "name": "@valewnrt/testa-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "npx launcher for the Testa MCP server (iOS Simulator E2E driver for AI agents). Requires the native `testa` binary — install it with Homebrew.",
   "keywords": [
     "mcp",
