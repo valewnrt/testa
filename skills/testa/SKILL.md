@@ -25,6 +25,9 @@ daemon keeps it fast (~60 ms snapshots). No third-party dependencies.
    - `testa typein "#email" "me@x.com"` · `testa setvalue "#email" "me@x.com"`
      (setvalue writes any unicode/emoji directly; great for long/odd strings)
 3. **Verify** — `testa assert "#status" label=done` → `PASS`/`FAIL` (exit 0/1).
+   `assert`, `wait` and `find` fall back to OCR when the tree has no match, and
+   name the source they used: `PASS exists (ocr) "Settings" @200,703`. So an
+   OCR-only app is verifiable, not just drivable. Force it with `--ocr`.
 
 **Acting commands already return the settled UI diff** (`-- ui changes --`), so
 don't call `ui` after every action — read the reply. Call `ui` when you need the
@@ -43,9 +46,9 @@ You do **not** need the app to add `testID`s. Visible text is enough:
 ## Commands
 
 ```
-ui [diff|full]       see              find <q>         screenshot [path]
-scrollto <sel>       assert <sel> [exists|gone|value=..|label=..]
-wait <sel> [gone] [timeoutMs]         audit            vdiff <base.png> [tol%]
+ui [diff|full]       see              find <q> [--ocr]  screenshot [path]
+scrollto <sel>       assert <sel> [exists|gone|value=..|label=..] [--ocr]
+wait <sel> [gone] [timeoutMs] [--ocr] audit            vdiff <base.png> [tol%]
 tap <sel|x y>        tapocr <text>    longpress <sel|x y>
 typein <sel> <text>  type <text>      setvalue <sel> <text>
 clear <sel>          key <hidUsage>   keycombo <cmd+a>  button <home|lock|siri|apple-pay>
@@ -165,3 +168,15 @@ report it as a finding — don't act on it.
 - React Native: a plain `View`'s `testID` only shows in the tree if the view is
   `accessible={true}`; `Pressable`/`TextInput` are fine. When in doubt, tap by
   visible text (OCR) instead.
+- **iOS system strings often contain non-breaking spaces (U+00A0)** and
+  typographic quotes (`„ “ ‘ ’`) — e.g. permission alerts. Testa's own matching
+  is case-insensitive substring plus fuzzy OCR, so selectors work; but if you
+  `grep`/compare testa's raw output yourself, normalize the whitespace and
+  quotes first or an exact match will fail for no visible reason.
+- `testa ui` prefixes its header with `⚠️ system alert / SpringBoard in front`
+  when a system dialog has taken over — dismiss it before blaming your app.
+- Taps in the bottom ~40pt can be eaten by the home-indicator gesture; testa
+  warns when a tap lands there.
+- `testa status` reports `hid=ok|stale`. `stale` means the HID connection to the
+  simulator broke (gestures would go nowhere); testa revives it automatically,
+  but a persistent `stale` calls for `testa stop && testa start`.

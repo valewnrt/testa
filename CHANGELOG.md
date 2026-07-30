@@ -3,6 +3,75 @@
 All notable changes to Testa are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); versions are git tags.
 
+## [0.2.1] — 2026-07-30
+
+Bug-fix release from dogfooding 0.2.0 against real apps. The headline is a
+silent-failure class: a warm daemon could go **deaf** — every `tap` replied
+success while nothing reached the screen — because a failed HID send was
+reported as a success. Verification could also not reach OCR-only screens.
+
+### Fixed — the deaf daemon (critical)
+- **HID send errors are no longer discarded.** `sendMessage:size:wait:` handed
+  the completion block's `NSError` to nobody and returned `YES` unconditionally.
+  When the simulator's HID connection died (`Mach port invalid, device
+  disconnected` — a SpringBoard/backboardd relaunch, a guest userspace reboot),
+  every gesture from then on was a no-op that reported success, until the daemon
+  was restarted. The error is now captured, including on the async
+  fire-and-forget path and on a 2 s send timeout.
+- **The HID client heals itself.** On a send failure testa re-creates
+  `SimulatorKit.SimDeviceLegacyHIDClient` from the live `SimDevice` and retries
+  once; a generation counter keeps a late completion from the dead client from
+  poisoning the fresh one. Revives are logged to `~/.testa/daemon-<udid>.log`.
+- **Failures now propagate.** `tap`, `longpress`, `swipe`, `drag`/`dragdrop`,
+  `pinch`, `rotate`, `type`, `key`, `keycombo` and `button` return an error
+  instead of `YES` when the underlying send failed. `pressKeyUsage` always
+  releases the modifiers it pressed, even on a mid-combo failure.
+- **Suspicious-streak detection.** Three HID actions in a row that produce an
+  empty UI diff trigger a proactive revive before the next gesture, noted in the
+  reply as `-- note: HID client revived after 3 no-op actions --`.
+- **`testa status` probes actuation, not just liveness** — the reply is now
+  `pong <name> hid=ok|stale`.
+
+### Fixed — verification on OCR-only screens
+- **`assert`, `wait` and `find` fall back to OCR** when the accessibility tree
+  has no match, so an app that can be *driven* by OCR can now also be *verified*
+  by it. Previously `testa see` showed `"Development Build"` while
+  `assert "Development Build" exists` failed.
+  - `assert <sel> exists|gone` — both directions; `gone` must clear the tree
+    *and* OCR.
+  - `wait <sel> [gone] [timeoutMs]` — polls the tree hot (~60 ms) and OCR at most
+    twice a second, so the fallback costs nothing when the tree answers.
+  - `find <query>` — OCR hits are listed prefixed with `(ocr)`.
+- **Replies name their source**, so results stay honest:
+  `PASS exists (tree) e5 Button …` vs `PASS exists (ocr) "Settings" @200,703`.
+- **New `--ocr` flag** (leading or trailing) on those three commands forces the
+  OCR path and skips the tree. OCR never runs for `ui`.
+
+### Added — signals that were missing
+- **`⚠️ system alert / SpringBoard in front`** in the `ui` header when the
+  frontmost application is SpringBoard (or unnamed) after a real app was
+  frontmost — a system dialog silently replacing the tree is now visible.
+- **Home-indicator warning.** A tap whose *y* is within 40pt of the screen
+  bottom appends
+  `-- warning: tap at y=… is inside the home-indicator strip (screen …pt); it may
+  trigger the home gesture --`. A warning, never a refusal.
+- **Hidden-children marker.** The engine now records each element's raw
+  `childCount`, and a snapshot line ends with ` (+N hidden)` when an element
+  reported children but nothing from its subtree survived filtering — a leaf and
+  a container that exposes nothing no longer look identical.
+
+### Docs
+- README + skill: iOS system strings routinely contain **non-breaking spaces
+  (U+00A0)** and typographic quotes. Testa's matching is case-insensitive
+  substring plus fuzzy OCR and is unaffected, but agents grepping testa's raw
+  output should normalize first.
+
+### User-visible behaviour changes
+- `testa status` / the daemon `ping` reply gained a ` hid=ok|stale` suffix.
+- `assert exists` and `wait` replies gained a ` (tree)` / ` (ocr)` source tag.
+- `find` can now succeed via OCR, printing `(ocr) "text" @x,y` lines that have
+  no ref, id or role.
+
 ## [0.2.0] — 2026-07-29
 
 The "runs without an agent" release. Testa still drives a simulator for an LLM,

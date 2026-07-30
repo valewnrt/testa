@@ -128,7 +128,9 @@ testa assert "#welcome" exists # → PASS / FAIL (exit 0/1)
    `"label"`, or `x y`. **The reply carries the settled UI diff** — no follow-up
    `ui` needed.
 3. **Verify** — `testa assert <sel> [exists|gone|value=…|label=…]` (exit 0/1),
-   `testa wait <sel> [gone] [timeoutMs]`.
+   `testa wait <sel> [gone] [timeoutMs]`. Both — and `find` — fall back to OCR
+   when the tree has no match, and say which source answered:
+   `PASS exists (ocr) "Settings" @200,703`. `--ocr` skips the tree entirely.
 4. **Keep it** — `testa flow record save smoke.flow`, then CI replays it forever.
 
 ```text
@@ -157,10 +159,10 @@ $ testa assert "#status" label=done  →  PASS exists e2 …
 Observe
   ui [diff|full]            on-screen snapshot (diff = changes, full = incl. off-screen)
   see                       OCR every visible text + tap coords (any app)
-  find <query>              elements matching label/id/value/role
+  find <query> [--ocr]      elements matching label/id/value/role (OCR fallback)
   scrollto <sel>            scroll until an element is visible (vertical or horizontal)
-  assert <sel> [exists|gone|value=..|label=..]
-  wait <sel> [gone] [timeoutMs]     wait until it appears — or disappears
+  assert <sel> [exists|gone|value=..|label=..] [--ocr]
+  wait <sel> [gone] [timeoutMs] [--ocr]  wait until it appears — or disappears
   audit                     accessibility audit (labels, 44pt targets, dupes)
   vdiff <baseline.png> [tolerancePct]   visual regression, OCR-aware
   screenshot [path.png]
@@ -300,7 +302,16 @@ $ testa see           # on-device OCR
 
 $ testa tapocr "Settings"
 tapped (ocr) "Settings" @200,703     →  #status = canvas:Settings
+
+$ testa assert "Settings" exists     # verification falls back to OCR too
+PASS exists (ocr) "Settings" @200,703
 ```
+
+> **Beware invisible characters.** iOS system strings (permission alerts,
+> SpringBoard UI) routinely contain **non-breaking spaces (U+00A0)** and
+> typographic quotes (`„ “ ‘ ’`). Testa's own matching is case-insensitive
+> substring plus fuzzy OCR, so selectors are unaffected — but if *you* grep or
+> string-compare testa's raw output, normalize the whitespace and quotes first.
 
 ## Token efficiency
 
@@ -437,6 +448,18 @@ CI    ──► testa flow run         ──┘
 - **OCR** runs Apple Vision over an in-process framebuffer capture (IOSurface).
 - **Device environment** goes through public `simctl` APIs — except the hardware
   buttons, which are real HID events like everything else.
+
+**Self-healing HID.** The HID connection can die under a long-lived daemon — a
+SpringBoard/backboardd relaunch or a guest userspace reboot invalidates its mach
+port (`Mach port invalid, device disconnected`) while every *read* path keeps
+working. Testa detects the failed send, re-creates the client and retries once;
+it also revives proactively after three gestures in a row that changed nothing,
+and notes it in the reply. `testa status` reports the state:
+
+```console
+$ testa status
+running: pong iPhone 17 Pro hid=ok        # hid=stale ⇒ gestures would go nowhere
+```
 
 ## Showcase / tests
 
