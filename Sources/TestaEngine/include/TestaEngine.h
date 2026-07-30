@@ -48,6 +48,21 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether the bound simulator is still booted (re-reads device state).
 - (BOOL)isBooted;
 
+// --- HID health ---
+//
+// The SimDeviceLegacyHIDClient holds a connection to the simulator's HID server.
+// That connection can die under a running daemon (SpringBoard/backboardd
+// relaunch, a system alert taking over the display) while every *read* path
+// keeps working — gestures then go nowhere. Sends detect it and heal once by
+// themselves; these two let the daemon report and force the same repair.
+
+/// NO once a HID send has failed and the client has not been revived since.
+@property (nonatomic, readonly, getter=isHIDClientHealthy) BOOL hidClientHealthy;
+
+/// Re-create the HID client from the live SimDevice. Cheap (a few ms) and safe
+/// to call at any time; logs one line to stderr when it succeeds.
+- (BOOL)reviveHIDClientWithError:(NSError **)error NS_SWIFT_NAME(reviveHIDClient());
+
 /// Type a string via the hardware keyboard (the focused field receives it).
 - (BOOL)typeText:(NSString *)text error:(NSError **)error NS_SWIFT_NAME(type(_:));
 
@@ -84,7 +99,10 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(rotate(x:y:radians:duration:));
 
 /// Flattened accessibility tree of the frontmost app. Each element dict has:
-/// role, label, id, value, x, y, w, h, enabled, traits, depth.
+/// role, label, id, value, x, y, w, h, enabled, traits, depth, childCount.
+/// `childCount` is the RAW number of accessibility children the node reported,
+/// before any filtering — so a caller can tell a real leaf apart from a node
+/// whose children were all dropped.
 /// The walk is bounded (25 s, and it aborts as soon as a bridged read times
 /// out); if it was cut short, a final `{role: AXTruncated}` marker is appended.
 /// Returns nil with an error if the simulator never answered at all.

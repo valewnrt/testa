@@ -13,6 +13,7 @@
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <malloc/malloc.h>
+#import <os/lock.h>
 
 static NSString *const TSTErrorDomain = @"com.testa.engine";
 
@@ -87,6 +88,15 @@ static NSString *TSTDeveloperDir(void) {
   // Walk state — only ever touched from the serial _axQueue.
   CFAbsoluteTime _walkDeadline;
   BOOL _walkTruncated;
+  // HID health. `_hidClient` is only ever swapped from the caller's (serial)
+  // command thread; the completion blocks run on _hidQueue and only touch
+  // _pendingSendError / _hidStale, both under _hidLock. `_hidGeneration` lets a
+  // late completion from a *replaced* client be ignored instead of poisoning the
+  // fresh one.
+  os_unfair_lock _hidLock;
+  NSError *_pendingSendError;
+  uint64_t _hidGeneration;
+  BOOL _hidStale;
 }
 @end
 
@@ -176,6 +186,7 @@ static NSString *TSTDeveloperDir(void) {
   _screenScale = scale;
   _screenPointSize = CGSizeMake(px.width / scale, px.height / scale);
 
+  _hidLock = OS_UNFAIR_LOCK_INIT;
   Class hidCls = objc_lookUpClass("SimulatorKit.SimDeviceLegacyHIDClient");
   if (hidCls) {
     NSError *e = nil;
@@ -235,26 +246,153 @@ static NSString *TSTDeveloperDir(void) {
   return message;
 }
 
-// Hand the bytes to the client. `freeWhenDone:YES` => the client owns/frees the copy.
-- (BOOL)sendMessage:(TSTIndigoMessage *)message size:(size_t)size wait:(BOOL)wait {
+#pragma mark - HID health
+
+// A send failure recorded by a completion block (which runs asynchronously on
+// _hidQueue, long after a wait:NO send returned). Ignored when it belongs to a
+// client we have since replaced.
+- (void)noteSendError:(NSError *)err generation:(uint64_t)gen {
+  if (!err) return;
+  os_unfair_lock_lock(&_hidLock);
+  if (gen == _hidGeneration) {
+    if (!_pendingSendError) _pendingSendError = err;
+    _hidStale = YES;
+  }
+  os_unfair_lock_unlock(&_hidLock);
+}
+
+- (nullable NSError *)takePendingSendError {
+  os_unfair_lock_lock(&_hidLock);
+  NSError *e = _pendingSendError;
+  _pendingSendError = nil;
+  os_unfair_lock_unlock(&_hidLock);
+  return e;
+}
+
+// Cheap liveness answer for `testa status`: we have a client and nothing has
+// failed on it since it was created (or last revived).
+- (BOOL)isHIDClientHealthy {
   if (!_hidClient) return NO;
+  os_unfair_lock_lock(&_hidLock);
+  BOOL stale = _hidStale;
+  os_unfair_lock_unlock(&_hidLock);
+  return !stale;
+}
+
+// Re-create SimulatorKit.SimDeviceLegacyHIDClient from the live SimDevice. The
+// old client's mach connection dies when the simulator's HID server restarts
+// (SpringBoard/backboardd relaunch, system alert takeover); its `send` then
+// fails forever while every *read* path keeps working — the "deaf daemon" bug.
+- (BOOL)reviveHIDClientWithError:(NSError **)error {
+  Class hidCls = objc_lookUpClass("SimulatorKit.SimDeviceLegacyHIDClient");
+  if (!hidCls) {
+    if (error) *error = TSTMakeError(14, @"SimDeviceLegacyHIDClient class unavailable");
+    return NO;
+  }
+  NSError *e = nil;
+  id<TSTLegacyHIDClient> fresh = [(id<TSTLegacyHIDClient>)[hidCls alloc] initWithDevice:_device error:&e];
+  if (!fresh) {
+    if (error) *error = e ?: TSTMakeError(15, @"could not re-create the HID client");
+    return NO;
+  }
+  _hidClient = fresh;
+  os_unfair_lock_lock(&_hidLock);
+  _hidGeneration++;          // late completions from the old client are now stale
+  _pendingSendError = nil;
+  _hidStale = NO;
+  os_unfair_lock_unlock(&_hidLock);
+  fprintf(stderr, "testad: HID client revived for %s\n", _udid.UTF8String ?: "?");
+  return YES;
+}
+
+#pragma mark - Message sending
+
+// One attempt. `wait:YES` blocks for the completion and reports its NSError;
+// `wait:NO` can only report a synchronous failure, so an error that arrives
+// later is stashed and picked up by the next send.
+- (BOOL)rawSendMessage:(const void *)message size:(size_t)size wait:(BOOL)wait error:(NSError **)error {
+  id<TSTLegacyHIDClient> client = _hidClient;
+  if (!client) {
+    if (error) *error = TSTMakeError(10, @"HID client unavailable");
+    return NO;
+  }
   void *copy = malloc(size);
+  if (!copy) {
+    if (error) *error = TSTMakeError(16, @"out of memory building a HID message");
+    return NO;
+  }
   memcpy(copy, message, size);
+
+  os_unfair_lock_lock(&_hidLock);
+  uint64_t gen = _hidGeneration;
+  os_unfair_lock_unlock(&_hidLock);
+
+  __block NSError *syncErr = nil;
   dispatch_semaphore_t sem = wait ? dispatch_semaphore_create(0) : NULL;
-  [_hidClient sendWithMessage:copy freeWhenDone:YES completionQueue:_hidQueue completion:^(NSError *err) {
-    if (sem) dispatch_semaphore_signal(sem);
+  __weak typeof(self) weakSelf = self;
+  [client sendWithMessage:copy freeWhenDone:YES completionQueue:_hidQueue completion:^(NSError *err) {
+    if (sem) {
+      syncErr = err;                 // read by the waiter after the signal
+      dispatch_semaphore_signal(sem);
+    } else if (err) {
+      [weakSelf noteSendError:err generation:gen];
+    }
   }];
-  if (sem) {
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+  if (!sem) return YES;              // fire-and-forget: nothing to report yet
+
+  if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) != 0) {
+    // Timed out. The completion may still fire and touch syncErr, so it must not
+    // be read from here any more — treat it as a failure of this generation.
+    NSError *timeout = TSTMakeError(17, @"HID send timed out (2s) — simulator HID connection stalled");
+    [self noteSendError:timeout generation:gen];
+    if (error) *error = timeout;
+    return NO;
+  }
+  if (syncErr) {
+    [self noteSendError:syncErr generation:gen];
+    if (error) *error = syncErr;
+    return NO;
   }
   return YES;
 }
 
-- (BOOL)touchAtPoint:(CGPoint)pt direction:(int)direction wait:(BOOL)wait {
+// Hand the bytes to the client, self-healing once. `freeWhenDone:YES` => the
+// client owns/frees the copy.
+- (BOOL)sendMessage:(const void *)message size:(size_t)size wait:(BOOL)wait error:(NSError **)error {
+  // A failure reported asynchronously by an earlier fire-and-forget send means
+  // this one would be swallowed too — revive before we even try.
+  NSError *pending = [self takePendingSendError];
+  if (pending) {
+    fprintf(stderr, "testad: HID send failed asynchronously (%s) — reviving client\n",
+            pending.localizedDescription.UTF8String ?: "?");
+    NSError *revErr = nil;
+    if (![self reviveHIDClientWithError:&revErr]) {
+      if (error) *error = revErr ?: pending;
+      return NO;
+    }
+  }
+
+  NSError *e1 = nil;
+  if ([self rawSendMessage:message size:size wait:wait error:&e1]) return YES;
+
+  fprintf(stderr, "testad: HID send failed (%s) — reviving client and retrying once\n",
+          e1.localizedDescription.UTF8String ?: "?");
+  NSError *revErr = nil;
+  if (![self reviveHIDClientWithError:&revErr]) {
+    if (error) *error = e1 ?: revErr;
+    return NO;
+  }
+  NSError *e2 = nil;
+  if ([self rawSendMessage:message size:size wait:wait error:&e2]) return YES;
+  if (error) *error = e2 ?: e1;
+  return NO;
+}
+
+- (BOOL)touchAtPoint:(CGPoint)pt direction:(int)direction wait:(BOOL)wait error:(NSError **)error {
   CGPoint r = [self ratioForPoint:pt];
   size_t sz = 0;
   TSTIndigoMessage *m = [self buildTouchMessageAtRatio:r direction:direction sizeOut:&sz];
-  BOOL ok = [self sendMessage:m size:sz wait:wait];
+  BOOL ok = [self sendMessage:m size:sz wait:wait error:error];
   free(m);
   return ok;
 }
@@ -262,17 +400,28 @@ static NSString *TSTDeveloperDir(void) {
 // Two simultaneous touch points. Passing a non-NULL second point makes the
 // SimulatorKit function emit a 3-payload multi-touch message; we patch the
 // ratios at their known byte offsets (finger1, digitizer summary, finger2).
-- (BOOL)twoFingerTouchAtPoint1:(CGPoint)p1 point2:(CGPoint)p2 direction:(int)direction wait:(BOOL)wait {
-  if (!_mouseFn) return NO;
+- (BOOL)twoFingerTouchAtPoint1:(CGPoint)p1 point2:(CGPoint)p2 direction:(int)direction
+                          wait:(BOOL)wait error:(NSError **)error {
+  if (!_mouseFn) {
+    if (error) *error = TSTMakeError(10, @"multi-touch HID unavailable");
+    return NO;
+  }
   CGPoint r1 = [self ratioForPoint:p1];
   CGPoint r2 = [self ratioForPoint:p2];
   CGPoint a = r1, b = r2;
   TSTIndigoMessage *msg = _mouseFn(&a, &b, 0x32, direction, NO);
-  if (!msg) return NO;
+  if (!msg) {
+    if (error) *error = TSTMakeError(18, @"could not build a multi-touch message");
+    return NO;
+  }
   size_t size = malloc_size(msg);
   // We patch bytes up to 0x184+8; refuse to write past a shorter allocation
   // (a future SimulatorKit could return a smaller multi-touch message).
-  if (size < 0x18C) { free(msg); return NO; }
+  if (size < 0x18C) {
+    free(msg);
+    if (error) *error = TSTMakeError(19, @"unexpected multi-touch message layout");
+    return NO;
+  }
   char *bytes = (char *)msg;
   memcpy(bytes + 0x3C, &r1.x, sizeof(double));   // finger 1
   memcpy(bytes + 0x44, &r1.y, sizeof(double));
@@ -280,7 +429,7 @@ static NSString *TSTDeveloperDir(void) {
   memcpy(bytes + 0xE4, &r1.y, sizeof(double));
   memcpy(bytes + 0x17C, &r2.x, sizeof(double));  // finger 2
   memcpy(bytes + 0x184, &r2.y, sizeof(double));
-  BOOL ok = [self sendMessage:(TSTIndigoMessage *)msg size:size wait:wait];
+  BOOL ok = [self sendMessage:msg size:size wait:wait error:error];
   free(msg);
   return ok;
 }
@@ -290,19 +439,17 @@ static NSString *TSTDeveloperDir(void) {
 - (BOOL)tapAtX:(double)x y:(double)y error:(NSError **)error {
   if (!_hidClient) { if (error) *error = TSTMakeError(10, @"HID client unavailable"); return NO; }
   CGPoint p = CGPointMake(x, y);
-  [self touchAtPoint:p direction:TST_BUTTON_TYPE_DOWN wait:YES];
+  if (![self touchAtPoint:p direction:TST_BUTTON_TYPE_DOWN wait:YES error:error]) return NO;
   usleep(60 * 1000);
-  [self touchAtPoint:p direction:TST_BUTTON_TYPE_UP wait:YES];
-  return YES;
+  return [self touchAtPoint:p direction:TST_BUTTON_TYPE_UP wait:YES error:error];
 }
 
 - (BOOL)longPressAtX:(double)x y:(double)y duration:(double)seconds error:(NSError **)error {
   if (!_hidClient) { if (error) *error = TSTMakeError(10, @"HID client unavailable"); return NO; }
   CGPoint p = CGPointMake(x, y);
-  [self touchAtPoint:p direction:TST_BUTTON_TYPE_DOWN wait:YES];
+  if (![self touchAtPoint:p direction:TST_BUTTON_TYPE_DOWN wait:YES error:error]) return NO;
   usleep((useconds_t)(seconds * 1e6));
-  [self touchAtPoint:p direction:TST_BUTTON_TYPE_UP wait:YES];
-  return YES;
+  return [self touchAtPoint:p direction:TST_BUTTON_TYPE_UP wait:YES error:error];
 }
 
 - (BOOL)swipeFromX:(double)x1 y:(double)y1 toX:(double)x2 y:(double)y2
@@ -319,13 +466,13 @@ static NSString *TSTDeveloperDir(void) {
   CGPoint end = CGPointMake(x2, y2);
 
   // Touch down at the start.
-  [self touchAtPoint:start direction:TST_BUTTON_TYPE_DOWN wait:YES];
+  if (![self touchAtPoint:start direction:TST_BUTTON_TYPE_DOWN wait:YES error:error]) return NO;
 
   // Hold (drag-and-drop pickup) — re-emit the contact so recognizers fire.
   if (holdDuration > 0) {
     NSUInteger holdSteps = MAX((NSUInteger)1, (NSUInteger)(holdDuration / 0.05));
     for (NSUInteger i = 0; i < holdSteps; i++) {
-      [self touchAtPoint:start direction:TST_BUTTON_TYPE_DOWN wait:NO];
+      if (![self touchAtPoint:start direction:TST_BUTTON_TYPE_DOWN wait:NO error:error]) return NO;
       usleep(50 * 1000);
     }
   } else {
@@ -340,35 +487,35 @@ static NSString *TSTDeveloperDir(void) {
     double t = (double)i / (double)steps;
     CGPoint p = CGPointMake(start.x + (end.x - start.x) * t,
                             start.y + (end.y - start.y) * t);
-    [self touchAtPoint:p direction:TST_BUTTON_TYPE_DOWN wait:NO];
+    if (![self touchAtPoint:p direction:TST_BUTTON_TYPE_DOWN wait:NO error:error]) return NO;
     usleep(perStep);
   }
 
   // Release at the end.
-  [self touchAtPoint:end direction:TST_BUTTON_TYPE_UP wait:YES];
-  return YES;
+  return [self touchAtPoint:end direction:TST_BUTTON_TYPE_UP wait:YES error:error];
 }
 
 // Two-finger gesture along a parameterized path. `pointsAtT` yields the two
 // finger positions for t in [0,1]. Down, interpolate, up.
-- (void)twoFingerGestureDuration:(double)duration
-                        positions:(void (^)(double t, CGPoint *p1, CGPoint *p2))positions {
+- (BOOL)twoFingerGestureDuration:(double)duration
+                        positions:(void (^)(double t, CGPoint *p1, CGPoint *p2))positions
+                            error:(NSError **)error {
   double dur = duration > 0 ? duration : 0.4;
   NSUInteger steps = MAX((NSUInteger)4, (NSUInteger)(dur / 0.012));
   useconds_t perStep = (useconds_t)((dur / steps) * 1e6);
 
   CGPoint p1, p2;
   positions(0.0, &p1, &p2);
-  [self twoFingerTouchAtPoint1:p1 point2:p2 direction:TST_BUTTON_TYPE_DOWN wait:YES];
+  if (![self twoFingerTouchAtPoint1:p1 point2:p2 direction:TST_BUTTON_TYPE_DOWN wait:YES error:error]) return NO;
   usleep(20 * 1000);
   for (NSUInteger i = 1; i <= steps; i++) {
     double t = (double)i / (double)steps;
     positions(t, &p1, &p2);
-    [self twoFingerTouchAtPoint1:p1 point2:p2 direction:TST_BUTTON_TYPE_DOWN wait:NO];
+    if (![self twoFingerTouchAtPoint1:p1 point2:p2 direction:TST_BUTTON_TYPE_DOWN wait:NO error:error]) return NO;
     usleep(perStep);
   }
   positions(1.0, &p1, &p2);
-  [self twoFingerTouchAtPoint1:p1 point2:p2 direction:TST_BUTTON_TYPE_UP wait:YES];
+  return [self twoFingerTouchAtPoint1:p1 point2:p2 direction:TST_BUTTON_TYPE_UP wait:YES error:error];
 }
 
 - (BOOL)pinchAtX:(double)x y:(double)y scale:(double)scale duration:(double)duration error:(NSError **)error {
@@ -377,24 +524,22 @@ static NSString *TSTDeveloperDir(void) {
   double base = MIN(_screenPointSize.width, _screenPointSize.height) / 4.0;
   double startGap = (scale >= 1.0) ? base : base * scale;
   double endGap   = (scale >= 1.0) ? base * scale : base;
-  [self twoFingerGestureDuration:duration positions:^(double t, CGPoint *p1, CGPoint *p2) {
+  return [self twoFingerGestureDuration:duration positions:^(double t, CGPoint *p1, CGPoint *p2) {
     double gap = startGap + (endGap - startGap) * t;
     *p1 = CGPointMake(center.x - gap / 2.0, center.y);
     *p2 = CGPointMake(center.x + gap / 2.0, center.y);
-  }];
-  return YES;
+  } error:error];
 }
 
 - (BOOL)rotateAtX:(double)x y:(double)y radians:(double)radians duration:(double)duration error:(NSError **)error {
   if (!_hidClient || !_mouseFn) { if (error) *error = TSTMakeError(10, @"HID client unavailable"); return NO; }
   CGPoint center = CGPointMake(x, y);
   double radius = MIN(_screenPointSize.width, _screenPointSize.height) / 5.0;
-  [self twoFingerGestureDuration:duration positions:^(double t, CGPoint *p1, CGPoint *p2) {
+  return [self twoFingerGestureDuration:duration positions:^(double t, CGPoint *p1, CGPoint *p2) {
     double a = radians * t;
     *p1 = CGPointMake(center.x + radius * cos(a),          center.y + radius * sin(a));
     *p2 = CGPointMake(center.x + radius * cos(a + M_PI),   center.y + radius * sin(a + M_PI));
-  }];
-  return YES;
+  } error:error];
 }
 
 - (BOOL)isBooted {
@@ -450,13 +595,23 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   }
 }
 
-- (BOOL)sendKeyUsage:(int)usage down:(BOOL)down {
-  if (!_keyboardFn) return NO;
+- (BOOL)sendKeyUsage:(int)usage down:(BOOL)down error:(NSError **)error {
+  if (!_keyboardFn) {
+    if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable");
+    return NO;
+  }
   TSTIndigoMessage *m = _keyboardFn(usage, down ? TST_BUTTON_TYPE_DOWN : TST_BUTTON_TYPE_UP);
-  if (!m) return NO;
+  if (!m) {
+    if (error) *error = TSTMakeError(13, @"could not build a key event");
+    return NO;
+  }
   size_t size = malloc_size(m);
-  if (size < sizeof(TSTIndigoMessage)) { free(m); return NO; }
-  BOOL ok = [self sendMessage:m size:size wait:NO];
+  if (size < sizeof(TSTIndigoMessage)) {
+    free(m);
+    if (error) *error = TSTMakeError(19, @"unexpected key message layout");
+    return NO;
+  }
+  BOOL ok = [self sendMessage:m size:size wait:NO error:error];
   free(m);
   return ok;
 }
@@ -472,6 +627,7 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   if (!_keyboardFn) { if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable"); return nil; }
   NSMutableString *typed = [NSMutableString string];
   NSMutableString *missed = [NSMutableString string];
+  __block NSError *sendErr = nil;
   // Iterate composed sequences so emoji/combining marks are reported whole
   // instead of being split into lone surrogates.
   [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
@@ -482,14 +638,18 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
       [missed appendString:sub];
       return;
     }
-    if (shift) { [self sendKeyUsage:0xE1 down:YES]; usleep(6 * 1000); }
-    [self sendKeyUsage:usage down:YES];
+    // A dead HID connection must abort typing, not silently drop the rest.
+    #define TST_KEY(u, d) if (![self sendKeyUsage:(u) down:(d) error:&sendErr]) { *stop = YES; return; }
+    if (shift) { TST_KEY(0xE1, YES); usleep(6 * 1000); }
+    TST_KEY(usage, YES);
     usleep(9 * 1000);
-    [self sendKeyUsage:usage down:NO];
+    TST_KEY(usage, NO);
     usleep(5 * 1000);
-    if (shift) { [self sendKeyUsage:0xE1 down:NO]; usleep(6 * 1000); }
+    if (shift) { TST_KEY(0xE1, NO); usleep(6 * 1000); }
+    #undef TST_KEY
     [typed appendString:sub];
   }];
+  if (sendErr) { if (error) *error = sendErr; return nil; }
   if (skipped && missed.length) *skipped = [missed copy];
   return [typed copy];
 }
@@ -503,22 +663,25 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   // Bit 0 ctrl, 1 shift, 2 alt, 3 cmd — left-hand usages on the keyboard page.
   static const int kModUsages[4] = {0xE0, 0xE1, 0xE2, 0xE3};
   int held[4]; int n = 0;
-  for (int i = 0; i < 4; i++) {
+  BOOL ok = YES;
+  for (int i = 0; i < 4 && ok; i++) {
     if (modifierMask & (1 << i)) {
       held[n++] = kModUsages[i];
-      [self sendKeyUsage:kModUsages[i] down:YES];
+      ok = [self sendKeyUsage:kModUsages[i] down:YES error:error];
       usleep(6 * 1000);
     }
   }
-  [self sendKeyUsage:usage down:YES];
+  if (ok) ok = [self sendKeyUsage:usage down:YES error:error];
   usleep(9 * 1000);
-  [self sendKeyUsage:usage down:NO];
+  if (ok) ok = [self sendKeyUsage:usage down:NO error:error];
   usleep(5 * 1000);
-  for (int i = n - 1; i >= 0; i--) {   // release in reverse order
-    [self sendKeyUsage:held[i] down:NO];
+  // Always release what we pressed, even after a failure — a stuck modifier
+  // would poison every later keystroke.
+  for (int i = n - 1; i >= 0; i--) {
+    [self sendKeyUsage:held[i] down:NO error:NULL];
     usleep(6 * 1000);
   }
-  return YES;
+  return ok;
 }
 
 #pragma mark - Hardware buttons
@@ -528,13 +691,23 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
 // the button and whose eventTarget is 0x33 (hardware) rather than 0x64
 // (keyboard). We take a keyboard message as the template so Apple's own code
 // fills the mach header / magic fields, then repoint it at the hardware target.
-- (BOOL)sendButtonSource:(unsigned int)source down:(BOOL)down {
-  if (!_keyboardFn) return NO;
+- (BOOL)sendButtonSource:(unsigned int)source down:(BOOL)down error:(NSError **)error {
+  if (!_keyboardFn) {
+    if (error) *error = TSTMakeError(11, @"Keyboard HID unavailable");
+    return NO;
+  }
   int dir = down ? TST_BUTTON_TYPE_DOWN : TST_BUTTON_TYPE_UP;
   TSTIndigoMessage *m = _keyboardFn(0, dir);
-  if (!m) return NO;
+  if (!m) {
+    if (error) *error = TSTMakeError(13, @"could not build button event");
+    return NO;
+  }
   size_t size = malloc_size(m);
-  if (size < sizeof(TSTIndigoMessage)) { free(m); return NO; }
+  if (size < sizeof(TSTIndigoMessage)) {
+    free(m);
+    if (error) *error = TSTMakeError(19, @"unexpected button message layout");
+    return NO;
+  }
   m->eventType = TST_INDIGO_EVENTTYPE_BUTTON;
   m->payload.field1 = 2;  // eventKind = button
   m->payload.timestamp = mach_absolute_time();
@@ -542,7 +715,7 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   m->payload.event.button.eventType = (unsigned int)dir;
   m->payload.event.button.eventTarget = TST_BUTTON_TARGET_HARDWARE;
   m->payload.event.button.keyCode = 0;
-  BOOL ok = [self sendMessage:m size:size wait:NO];
+  BOOL ok = [self sendMessage:m size:size wait:NO error:error];
   free(m);
   return ok;
 }
@@ -569,13 +742,9 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
     return NO;
   }
   unsigned int source = src.unsignedIntValue;
-  if (![self sendButtonSource:source down:YES]) {
-    if (error) *error = TSTMakeError(13, @"could not build button event");
-    return NO;
-  }
+  if (![self sendButtonSource:source down:YES error:error]) return NO;
   usleep(50 * 1000);
-  [self sendButtonSource:source down:NO];
-  return YES;
+  return [self sendButtonSource:source down:NO error:error];
 }
 
 #pragma mark - Accessibility
@@ -847,6 +1016,10 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   id traitsVal = [axp accessibilityAttributeValue:@"AXTraits"];
   if ([traitsVal isKindOfClass:NSNumber.class]) traits = [traitsVal unsignedLongLongValue];
 
+  // Read the children *before* emitting, so the snapshot can tell "leaf" apart
+  // from "has children that were all filtered out" (a tab bar that exposes none).
+  NSArray *children = [ax accessibilityChildren];
+
   NSMutableDictionary *d = [NSMutableDictionary dictionary];
   d[@"role"] = role ?: @"";
   if (label.length) d[@"label"] = label;
@@ -859,9 +1032,9 @@ static BOOL TSTUsageForChar(unichar c, int *usage, BOOL *shift) {
   d[@"enabled"] = @(enabled);
   d[@"traits"] = @(traits);
   d[@"depth"] = @(depth);
+  d[@"childCount"] = @(children.count);
   [out addObject:d];
 
-  NSArray *children = [ax accessibilityChildren];
   for (id child in children) {
     [self serializeElement:child token:token depth:depth + 1 into:out];
   }
