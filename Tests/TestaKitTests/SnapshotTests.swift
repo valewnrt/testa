@@ -219,6 +219,103 @@ final class SnapshotTests: XCTestCase {
         XCTAssertTrue(snap.find("\\n").isEmpty)
     }
 
+    // MARK: - Hidden children: "this is not a leaf, you just cannot see inside"
+
+    /// A native tab bar whose three tab children expose nothing at all.
+    func tabBarTree() -> [[String: Any]] {
+        [
+            ["role": "AXApplication", "label": "App", "x": 0.0, "y": 0.0, "w": 400.0, "h": 800.0,
+             "depth": 0, "childCount": 1],
+            ["role": "AXTabBar", "id": "tabs", "x": 0.0, "y": 750.0, "w": 400.0, "h": 50.0,
+             "depth": 1, "childCount": 3],
+            ["role": "AXGroup", "x": 0.0, "y": 750.0, "w": 133.0, "h": 50.0, "depth": 2, "childCount": 0],
+            ["role": "AXGroup", "x": 133.0, "y": 750.0, "w": 133.0, "h": 50.0, "depth": 2, "childCount": 0],
+            ["role": "AXGroup", "x": 266.0, "y": 750.0, "w": 133.0, "h": 50.0, "depth": 2, "childCount": 0],
+        ]
+    }
+
+    func testHiddenChildrenAreReported() {
+        let snap = Snapshot(elements: tabBarTree(), screenW: 400, screenH: 800)
+        let bar = snap.resolve("#tabs")!
+        XCTAssertEqual(bar.childCount, 3)
+        XCTAssertEqual(bar.hiddenChildren, 3)
+        XCTAssertTrue(snap.line(bar).hasSuffix("(+3 hidden)"))
+    }
+
+    func testHiddenMarkerIsSilentWhenChildrenSurvive() {
+        let snap = sample()   // the sample tree carries no childCount at all
+        XCTAssertTrue(snap.all.allSatisfy { $0.hiddenChildren == 0 })
+        XCTAssertFalse(snap.compact.contains("hidden"))
+
+        // A parent whose child IS kept must not be flagged.
+        let visible = Snapshot(elements: [
+            ["role": "AXGroup", "id": "box", "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0,
+             "depth": 0, "childCount": 1],
+            ["role": "AXButton", "label": "Go", "x": 0.0, "y": 0.0, "w": 50.0, "h": 20.0,
+             "depth": 1, "childCount": 0],
+        ], screenW: 400, screenH: 800)
+        XCTAssertEqual(visible.resolve("#box")?.hiddenChildren, 0)
+        XCTAssertFalse(visible.compact.contains("hidden"))
+    }
+
+    func testCreditPassesThroughFilteredIntermediates() {
+        // The wrapper group is filtered out, but the button below it survives —
+        // so the outer element is NOT hiding anything and must stay unmarked.
+        let snap = Snapshot(elements: [
+            ["role": "AXGroup", "id": "outer", "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0,
+             "depth": 0, "childCount": 1],
+            ["role": "AXGroup", "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0, "depth": 1, "childCount": 1],
+            ["role": "AXButton", "label": "Deep", "x": 0.0, "y": 0.0, "w": 50.0, "h": 20.0,
+             "depth": 2, "childCount": 0],
+        ], screenW: 400, screenH: 800)
+        XCTAssertEqual(snap.resolve("#outer")?.hiddenChildren, 0)
+        XCTAssertEqual(snap.resolve("Deep")?.hiddenChildren, 0)
+    }
+
+    func testSiblingsDoNotCreditEachOther() {
+        // Two peers at the same depth: the second one hides its children even
+        // though the first one's survived.
+        let snap = Snapshot(elements: [
+            ["role": "AXGroup", "id": "root", "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0,
+             "depth": 0, "childCount": 2],
+            ["role": "AXGroup", "id": "openBox", "x": 0.0, "y": 0.0, "w": 50.0, "h": 50.0,
+             "depth": 1, "childCount": 1],
+            ["role": "AXButton", "label": "Visible", "x": 0.0, "y": 0.0, "w": 40.0, "h": 20.0,
+             "depth": 2, "childCount": 0],
+            ["role": "AXGroup", "id": "closedBox", "x": 50.0, "y": 0.0, "w": 50.0, "h": 50.0,
+             "depth": 1, "childCount": 2],
+            ["role": "AXGroup", "x": 50.0, "y": 0.0, "w": 25.0, "h": 50.0, "depth": 2, "childCount": 0],
+            ["role": "AXGroup", "x": 75.0, "y": 0.0, "w": 25.0, "h": 50.0, "depth": 2, "childCount": 0],
+        ], screenW: 400, screenH: 800)
+        XCTAssertEqual(snap.resolve("#root")?.hiddenChildren, 0)
+        XCTAssertEqual(snap.resolve("#openBox")?.hiddenChildren, 0)
+        XCTAssertEqual(snap.resolve("#closedBox")?.hiddenChildren, 2)
+        XCTAssertTrue(snap.line(snap.resolve("#closedBox")!).hasSuffix("(+2 hidden)"))
+    }
+
+    func testHiddenMarkerFollowsTheDisabledFlag() {
+        let snap = Snapshot(elements: [
+            ["role": "AXButton", "label": "Menu", "x": 0.0, "y": 0.0, "w": 40.0, "h": 20.0,
+             "depth": 0, "childCount": 4, "enabled": false],
+            ["role": "AXGroup", "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "depth": 1, "childCount": 0],
+        ], screenW: 400, screenH: 800)
+        XCTAssertEqual(snap.line(snap.all[0]), "e1 Button \"Menu\" @20,10 (disabled) (+4 hidden)")
+    }
+
+    func testHiddenChildrenDoNotAffectDiffIdentity() {
+        let a = Snapshot(elements: tabBarTree(), screenW: 400, screenH: 800)
+        let b = Snapshot(elements: tabBarTree(), screenW: 400, screenH: 800)
+        XCTAssertEqual(b.diff(from: a), "(no change)")
+    }
+
+    func testRefsAndOrderAreUnchangedByTheParentWalk() {
+        // Filtered elements must not consume refs — e1/e2 stay where they were.
+        let snap = Snapshot(elements: tabBarTree(), screenW: 400, screenH: 800)
+        XCTAssertEqual(snap.all.count, 2)
+        XCTAssertEqual(snap.all.map(\.ref), ["e1", "e2"])
+        XCTAssertEqual(snap.byRef["e2"]?.id, "tabs")
+    }
+
     func testTruncationMarkerSurvivesFiltering() {
         let snap = Snapshot(elements: [
             ["role": "AXButton", "label": "Tap me", "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0],

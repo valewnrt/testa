@@ -14,10 +14,12 @@ testa — autonomous iOS Simulator E2E driver for AI agents
   Observe:
     testa ui [diff|full]            on-screen snapshot (diff=changes, full=incl. off-screen)
     testa see                       OCR every visible text + tap coords (any app)
-    testa find <query>              elements matching label/id/value/role
+    testa find <query> [--ocr]      elements matching label/id/value/role
     testa scrollto <sel>            scroll until an element is visible
-    testa assert <sel> [exists|gone|value=..|label=..]
-    testa wait <sel> [gone] [timeoutMs]   wait until it appears (or disappears)
+    testa assert <sel> [exists|gone|value=..|label=..] [--ocr]
+    testa wait <sel> [gone] [timeoutMs] [--ocr]   wait until it appears (or disappears)
+                                    find/assert/wait fall back to OCR when the
+                                    tree misses; --ocr forces the OCR path
     testa audit                     accessibility audit (labels, 44pt targets, dupes)
     testa vdiff <baseline.png> [tolerancePct]   visual regression (writes the
                                     baseline on first run; OCR-aware diff after)

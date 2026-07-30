@@ -67,6 +67,22 @@ final class Daemon {
     var lastBundle: String?
     private var lockFD: Int32 = -1
 
+    // --- HID actuation health (see `reviveHIDClient` in the engine) ---
+    //
+    // A tap can report success and still change nothing: either the tap was
+    // legitimately inert, or the HID connection died and the message went
+    // nowhere. We cannot tell them apart from one action — but a *streak* of
+    // no-op gestures is the signature of a deaf client, so after three in a row
+    // we revive before the next one. Cheap (a few ms) and self-limiting.
+    static let noopStreakLimit = 3
+    private var noopStreak = 0
+    private var trackNoop = false      // is the running command HID-driven?
+    private var pendingNote = ""       // appended to the next mutating reply
+
+    // --- frontmost app tracking (system alert / SpringBoard detection) ---
+    private var frontApp: String?      // label of the root AXApplication
+    private var lastUserApp: String?   // last frontmost app that wasn't the shell
+
     // Command history — what `testa flow record` replays. Always on (a ring of
     // the last 500 commands) so recording is a decision you can make *after* an
     // interesting sequence happened, not before.
@@ -92,6 +108,15 @@ final class Daemon {
         "tap", "tapocr", "typein", "type", "setvalue", "clear", "key", "swipe",
         "drag", "dragdrop", "longpress", "pinch", "rotate", "scrollto", "scrollTo",
         "button", "keycombo", "statusbar", "appearance", "contentsize", "push",
+    ]
+
+    // The subset that actuates the simulator over HID. Only these feed the
+    // no-op streak: `statusbar`/`appearance`/`push` legitimately change nothing
+    // on screen and must not be read as evidence of a dead HID client.
+    static let hidCommands: Set<String> = [
+        "tap", "tapocr", "typein", "type", "setvalue", "clear", "key", "swipe",
+        "drag", "dragdrop", "longpress", "pinch", "rotate", "scrollto", "scrollTo",
+        "button", "keycombo",
     ]
 
     // One daemon per simulator. Whoever takes the lock binds; a racing spawn exits
@@ -149,8 +174,46 @@ final class Daemon {
         let snap = Snapshot(elements: tree,
                             screenW: Double(sim.screenPointSize.width),
                             screenH: Double(sim.screenPointSize.height))
+        // The root AXApplication names whoever owns the screen right now. Track
+        // it so `ui` can say when a system alert has taken the app's place.
+        if let root = tree.first(where: { ($0["role"] as? String) == "AXApplication" }) {
+            let label = ((root["label"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+            frontApp = label
+            if !Daemon.isSystemShell(label) { lastUserApp = label }
+        }
         last = snap
         return snap
+    }
+
+    /// SpringBoard (or an unnamed root) owns the screen — i.e. not the app under
+    /// test. System alerts (permissions, Face ID, "…would like to…") are hosted
+    /// there, and so is the home screen.
+    static func isSystemShell(_ appLabel: String) -> Bool {
+        appLabel.isEmpty || appLabel.caseInsensitiveCompare("SpringBoard") == .orderedSame
+    }
+
+    /// One extra line for the `ui` header when the app under test lost the front.
+    func frontmostWarning() -> String? {
+        guard let front = frontApp, Daemon.isSystemShell(front),
+              let app = lastUserApp, !Daemon.isSystemShell(app) else { return nil }
+        return "⚠️ system alert / SpringBoard in front — your app is not frontmost (was \"\(Snapshot.escaped(app, limit: 60))\")"
+    }
+
+    /// Taps in the bottom strip race the home-indicator swipe recognizer. We do
+    /// not refuse them — plenty of apps put real controls there — but the agent
+    /// deserves to know why nothing happened.
+    /// 50pt, not the 34pt indicator height: a tap at y=828 on an 874pt screen
+    /// (46pt up) was observed backgrounding the app during dogfooding.
+    static let homeIndicatorStrip: Double = 50
+
+    static func homeIndicatorWarning(y: Double, screenH h: Double) -> String {
+        guard h > 0, y.isFinite, y >= h - homeIndicatorStrip else { return "" }
+        return "\n-- warning: tap at y=\(Int(y)) is inside the home-indicator strip "
+            + "(screen \(Int(h))pt); it may trigger the home gesture --"
+    }
+
+    func homeIndicatorWarning(_ y: Double) -> String {
+        Daemon.homeIndicatorWarning(y: y, screenH: Double(sim.screenPointSize.height))
     }
 
     func currentForResolve() -> Snapshot {
@@ -161,16 +224,22 @@ final class Daemon {
     // Every mutating reply carries the settled delta, so the agent almost never
     // needs a follow-up `ui` round-trip.
     func withDiff(_ text: String, from prev: Snapshot?, after post: Snapshot? = nil) -> Reply {
+        let note = pendingNote
+        pendingNote = ""
         guard let prev = prev, let now = post ?? (try? snapshot()) else {
-            return Reply(ok: true, text: text)
+            return Reply(ok: true, text: text + note)
         }
         let d = now.diff(from: prev)
-        if d == "(no change)" { return Reply(ok: true, text: text + "\n-- no ui change --") }
+        if d == "(no change)" {
+            if trackNoop { noopStreak += 1 }
+            return Reply(ok: true, text: text + note + "\n-- no ui change --")
+        }
+        noopStreak = 0
         let lines = d.split(separator: "\n").map(String.init)
         let shown = lines.count > 30
             ? Array(lines.prefix(30)) + ["(+\(lines.count - 30) more — run `ui` for full state)"]
             : lines
-        return Reply(ok: true, text: text + "\n-- ui changes --\n" + shown.joined(separator: "\n"))
+        return Reply(ok: true, text: text + note + "\n-- ui changes --\n" + shown.joined(separator: "\n"))
     }
 
     // Poll the tree until two consecutive reads are identical (UI quiescent) or
@@ -275,30 +344,65 @@ final class Daemon {
         return (Double(el.cx), Double(el.cy))
     }
 
-    // OCR fallback: find visible text on screen (works with no app accessibility).
-    // Vision misreads a character now and then, so matching degrades gracefully:
+    /// One matched OCR text region, already reduced to a tap-ready center.
+    struct OCRHit {
+        let text: String
+        let x: Double, y: Double
+        var at: String { "@\(Int(x)),\(Int(y))" }
+        /// Screen text is untrusted input — render it the same way tree labels are.
+        var rendered: String { "\"\(Snapshot.escaped(text))\" \(at)" }
+    }
+
+    // OCR fallback matching (works with no app accessibility). Vision misreads a
+    // character now and then, so matching degrades gracefully, best tier first:
     // exact -> substring -> punctuation-insensitive -> small edit distance.
-    func ocrCenter(matching query: String) -> (Double, Double, String)? {
-        guard let obs = try? sim.recognizeText() else { return nil }
+    // Pure over the engine's observation dicts, so it is unit-testable.
+    static func ocrMatches(_ obs: [[String: Any]], query: String) -> [OCRHit] {
         let q = query.lowercased()
-        let qn = Daemon.normalize(query)
+        let qn = normalize(query)
         func text(_ o: [String: Any]) -> String { (o["text"] as? String) ?? "" }
 
-        var hit = obs.first { text($0).lowercased() == q }
-            ?? obs.first { text($0).lowercased().contains(q) }
-            ?? obs.first { !qn.isEmpty && Daemon.normalize(text($0)) == qn }
-        if hit == nil, query.count >= 5 {
+        var order: [Int] = []
+        var seen = Set<Int>()
+        func tier(_ pred: (String) -> Bool) {
+            for (i, o) in obs.enumerated() where !seen.contains(i) && pred(text(o)) {
+                seen.insert(i); order.append(i)
+            }
+        }
+        if !q.isEmpty {
+            tier { $0.lowercased() == q }
+            tier { $0.lowercased().contains(q) }
+        }
+        if !qn.isEmpty { tier { normalize($0) == qn } }
+        if order.isEmpty, query.count >= 5 {
             let budget = Swift.max(1, query.count / 8)
             let qc = Array(q)
-            hit = obs.map { ($0, Daemon.editDistance(qc, Array(text($0).lowercased()))) }
-                .filter { $0.1 <= budget }
-                .min { $0.1 < $1.1 }?.0
+            for (i, _) in obs.enumerated()
+                .map({ ($0.offset, editDistance(qc, Array(text($0.element).lowercased()))) })
+                .filter({ $0.1 <= budget })
+                .sorted(by: { $0.1 < $1.1 }) {
+                order.append(i)
+            }
         }
-        guard let h = hit,
-              let x = h["x"] as? Double, let y = h["y"] as? Double,
-              let w = h["w"] as? Double, let ht = h["h"] as? Double,
-              let t = h["text"] as? String else { return nil }
-        return (x + w / 2, y + ht / 2, t)
+        return order.compactMap { i -> OCRHit? in
+            let o = obs[i]
+            guard let t = o["text"] as? String,
+                  let x = o["x"] as? Double, let y = o["y"] as? Double,
+                  let w = o["w"] as? Double, let h = o["h"] as? Double else { return nil }
+            return OCRHit(text: t, x: x + w / 2, y: y + h / 2)
+        }
+    }
+
+    /// Live OCR of the screen, filtered to `query`. Costs ~300 ms — only call it
+    /// when the accessibility tree has already missed.
+    func ocrHits(matching query: String) -> [OCRHit] {
+        guard let obs = try? sim.recognizeText() else { return [] }
+        return Daemon.ocrMatches(obs, query: query)
+    }
+
+    func ocrCenter(matching query: String) -> (Double, Double, String)? {
+        guard let h = ocrHits(matching: query).first else { return nil }
+        return (h.x, h.y, h.text)
     }
 
     static func normalize(_ s: String) -> String {
@@ -517,7 +621,15 @@ final class Daemon {
               let cmd = argv.first else {
             return Reply(ok: false, text: "bad request")
         }
-        let a = Array(argv.dropFirst())
+        var a = Array(argv.dropFirst())
+        // `--ocr` (leading or trailing) forces the OCR path for the three read
+        // commands that also have one. Only stripped for those, so `type --ocr`
+        // still types the literal text.
+        var forceOCR = false
+        if ["assert", "wait", "find"].contains(cmd), let i = a.firstIndex(of: "--ocr") {
+            forceOCR = true
+            a.remove(at: i)
+        }
         // Reject NaN/inf outright: "tap nan nan" must not reach the touch pipeline.
         func fin(_ s: String?, _ def: Double) -> Double {
             guard let s = s, let v = Double(s), v.isFinite else { return def }
@@ -541,9 +653,27 @@ final class Daemon {
             // Pre-action state for the reply diff (cheap: usually the cached tree).
             let pre: Snapshot? = Daemon.mutatingCommands.contains(cmd) ? currentForResolve() : nil
 
+            // Actuation self-healing: a run of gestures that all changed nothing
+            // is what a dead HID client looks like from the outside. Re-create it
+            // before the next one and say so in the reply.
+            trackNoop = Daemon.hidCommands.contains(cmd)
+            pendingNote = ""
+            if trackNoop, noopStreak >= Daemon.noopStreakLimit {
+                let n = noopStreak
+                noopStreak = 0
+                do {
+                    try sim.reviveHIDClient()
+                    pendingNote = "\n-- note: HID client revived after \(n) no-op actions --"
+                } catch {
+                    pendingNote = "\n-- note: HID client revive failed: \(error.localizedDescription) --"
+                }
+            }
+
             switch cmd {
             case "ping":
-                return Reply(ok: true, text: "pong \(sim.name)")
+                // Liveness alone is a lie when the HID connection has died under
+                // us: reads keep answering while gestures go nowhere. Say both.
+                return Reply(ok: true, text: "pong \(sim.name) hid=\(sim.isHIDClientHealthy ? "ok" : "stale")")
 
             case "info":
                 return Reply(ok: true, text: "\(sim.name) [\(sim.udid)] \(Int(sim.screenPointSize.width))x\(Int(sim.screenPointSize.height))pt @\(sim.screenScale)x")
@@ -556,7 +686,8 @@ final class Daemon {
                 }
                 let full = a.contains("full")
                 let els = full ? snap.all : snap.visible
-                let header = "\(els.count) elements" + (full ? " (full tree)" : " (on screen)")
+                var header = "\(els.count) elements" + (full ? " (full tree)" : " (on screen)")
+                if let warn = frontmostWarning() { header += " " + warn }
                 let body = els.map(snap.line).joined(separator: "\n")
                 return Reply(ok: true, text: header + "\n" + body)
 
@@ -604,35 +735,44 @@ final class Daemon {
                 return withDiff("cleared \(sel)", from: pre)
 
             case "find" where !a.isEmpty:
+                let query = a.joined(separator: " ")
                 let snap = try snapshot()
-                let hits = snap.find(a.joined(separator: " "))
-                if hits.isEmpty { return Reply(ok: false, text: "no match") }
-                return Reply(ok: true, text: hits.map(snap.line).joined(separator: "\n"))
+                let hits = forceOCR ? [] : snap.find(query)
+                if !hits.isEmpty { return Reply(ok: true, text: hits.map(snap.line).joined(separator: "\n")) }
+                // Tree miss: fall back to on-screen text. Marked `(ocr)` so the
+                // agent knows these have no ref, id or role — only coordinates.
+                let seen = ocrHits(matching: Daemon.clean(query))
+                if !seen.isEmpty {
+                    return Reply(ok: true, text: seen.map { "(ocr) \($0.rendered)" }.joined(separator: "\n"))
+                }
+                return Reply(ok: false, text: "no match")
 
             case "tap":
                 if a.count >= 2, Double(a[0]) != nil, Double(a[1]) != nil {
                     try sim.tap(x: num(0), y: num(1)); settle()
-                    return withDiff("tapped @\(Int(num(0))),\(Int(num(1)))", from: pre)
+                    return withDiff("tapped @\(Int(num(0))),\(Int(num(1)))" + homeIndicatorWarning(num(1)),
+                                    from: pre)
                 }
                 let sel = a.joined(separator: " ")
                 if let el = currentForResolve().resolve(sel) {
                     try sim.tap(x: Double(el.cx), y: Double(el.cy)); settle()
-                    return withDiff("tapped \(el.ref) \(el.shortRole) \(el.label ?? el.id ?? "")", from: pre)
+                    return withDiff("tapped \(el.ref) \(el.shortRole) \(el.label ?? el.id ?? "")"
+                                    + homeIndicatorWarning(Double(el.cy)), from: pre)
                 }
                 // Fallback: tap visible text via OCR (no accessibility needed).
-                if let (x, y, text) = ocrCenter(matching: Daemon.clean(sel)) {
-                    try sim.tap(x: x, y: y); settle()
-                    return withDiff("tapped (ocr) \"\(text)\" @\(Int(x)),\(Int(y))", from: pre)
+                if let h = ocrHits(matching: Daemon.clean(sel)).first {
+                    try sim.tap(x: h.x, y: h.y); settle()
+                    return withDiff("tapped (ocr) \(h.rendered)" + homeIndicatorWarning(h.y), from: pre)
                 }
                 return Reply(ok: false, text: "not found: \(sel)")
 
             case "tapocr" where !a.isEmpty:
                 let q = Daemon.clean(a.joined(separator: " "))
-                guard let (x, y, text) = ocrCenter(matching: q) else {
+                guard let h = ocrHits(matching: q).first else {
                     return Reply(ok: false, text: "no visible text matching: \(q)")
                 }
-                try sim.tap(x: x, y: y); settle()
-                return withDiff("tapped (ocr) \"\(text)\" @\(Int(x)),\(Int(y))", from: pre)
+                try sim.tap(x: h.x, y: h.y); settle()
+                return withDiff("tapped (ocr) \(h.rendered)" + homeIndicatorWarning(h.y), from: pre)
 
             case "type" where !a.isEmpty:
                 let note = try typeSmart(a.joined(separator: " ")); settle()
@@ -727,14 +867,24 @@ final class Daemon {
                 settle()
                 return withDiff("set value of \(sel)", from: pre)
 
+            // The accessibility tree is the fast, precise source; on-screen text
+            // is the fallback that keeps OCR-only apps verifiable and not just
+            // drivable. Every reply names the source it used — (tree) or (ocr).
             case "assert" where !a.isEmpty:
                 let snap = try snapshot()
                 let sel = a[0]
                 let cond = a.count >= 2 ? a[1...].joined(separator: " ") : "exists"
-                let el = snap.resolve(sel)
+                let el = forceOCR ? nil : snap.resolve(sel)
                 if cond == "gone" {
-                    return el == nil ? Reply(ok: true, text: "PASS gone \(sel)") : Reply(ok: false, text: "FAIL still present \(sel)")
+                    if let el = el { return Reply(ok: false, text: "FAIL still present (tree) \(snap.line(el))") }
+                    // "gone" has to clear both sources, or an OCR-only element
+                    // would silently count as absent.
+                    if let h = ocrHits(matching: Daemon.clean(sel)).first {
+                        return Reply(ok: false, text: "FAIL still present (ocr) \(h.rendered)")
+                    }
+                    return Reply(ok: true, text: "PASS gone \(sel)")
                 }
+                // value=/label= are properties of a tree node; OCR has neither.
                 if cond.hasPrefix("value=") {
                     let want = String(cond.dropFirst(6))
                     let got = el?.value ?? ""
@@ -745,7 +895,11 @@ final class Daemon {
                     let got = el?.label ?? ""
                     return got == want ? Reply(ok: true, text: "PASS label \(want)") : Reply(ok: false, text: "FAIL label got \"\(got)\" want \"\(want)\"")
                 }
-                return el != nil ? Reply(ok: true, text: "PASS exists \(snap.line(el!))") : Reply(ok: false, text: "FAIL not found \(sel)")
+                if let el = el { return Reply(ok: true, text: "PASS exists (tree) \(snap.line(el))") }
+                if let h = ocrHits(matching: Daemon.clean(sel)).first {
+                    return Reply(ok: true, text: "PASS exists (ocr) \(h.rendered)")
+                }
+                return Reply(ok: false, text: "FAIL not found \(sel)")
 
             case "wait" where !a.isEmpty:
                 let sel = a[0]
@@ -754,11 +908,24 @@ final class Daemon {
                 if gone { rest.removeFirst() }
                 let timeout = Swift.min(Swift.max(fin(rest.first, 5000), 0), 60_000)
                 let start = Date()
+                // Tree polls are ~60 ms, an OCR pass ~300 ms — so poll the tree
+                // hot and only reach for OCR when the tree keeps missing.
+                var nextOCR = Date.distantPast
                 repeat {
                     let snap = try snapshot()
-                    let el = snap.resolve(sel)
-                    if gone, el == nil { return Reply(ok: true, text: "gone \(sel)") }
-                    if !gone, let el = el { return Reply(ok: true, text: "appeared \(snap.line(el))") }
+                    let el = forceOCR ? nil : snap.resolve(sel)
+                    if !gone, let el = el { return Reply(ok: true, text: "appeared (tree) \(snap.line(el))") }
+                    var ocrChecked = false
+                    var ocrHit: OCRHit? = nil
+                    if el == nil, Date() >= nextOCR {
+                        ocrChecked = true
+                        nextOCR = Date().addingTimeInterval(0.5)
+                        ocrHit = ocrHits(matching: Daemon.clean(sel)).first
+                    }
+                    if !gone, let h = ocrHit { return Reply(ok: true, text: "appeared (ocr) \(h.rendered)") }
+                    if gone, el == nil, ocrChecked, ocrHit == nil {
+                        return Reply(ok: true, text: "gone \(sel)")
+                    }
                     usleep(120 * 1000)
                 } while Date().timeIntervalSince(start) * 1000 < timeout
                 return Reply(ok: false, text: "timeout waiting for \(sel)\(gone ? " to disappear" : "")")

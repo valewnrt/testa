@@ -14,6 +14,11 @@ public struct UIElement {
     public let enabled: Bool
     public let depth: Int
     public var onScreen: Bool = true
+    /// Raw number of accessibility children the engine saw, before filtering.
+    public var childCount: Int = 0
+    /// Set when `childCount > 0` but nothing from this element's subtree made it
+    /// into the snapshot — the element hides everything it contains.
+    public var hiddenChildren: Int = 0
 
     public var cx: Int { Int((x + w / 2).rounded()) }
     public var cy: Int { Int((y + h / 2).rounded()) }
@@ -62,14 +67,29 @@ public struct Snapshot {
         var kept: [UIElement] = []
         var map: [String: UIElement] = [:]
         var n = 0
+        // The engine emits a pre-order walk, so `depth` alone reconstructs the
+        // parent chain. We carry the nearest KEPT ancestor down that chain: every
+        // element we keep is credited to it, and an element that ends up with no
+        // credited descendant at all is one whose whole subtree was filtered away.
+        struct Frame { let depth: Int; let nearestKept: Int? }
+        var stack: [Frame] = []
+        var survivors: [Int] = []   // per kept element: descendants that survived
+
         for e in elements {
+            let depth = (e["depth"] as? Int) ?? 0
+            while let top = stack.last, top.depth >= depth { stack.removeLast() }
+            let parentKept = stack.last?.nearestKept
+
             let role = (e["role"] as? String) ?? ""
             let label = (e["label"] as? String)?.nilIfEmpty
             let id = (e["id"] as? String)?.nilIfEmpty
             let value = (e["value"] as? String)?.nilIfEmpty
             let w = (e["w"] as? Double) ?? 0
             let h = (e["h"] as? Double) ?? 0
-            guard Snapshot.interesting(role: role, label: label, id: id, value: value, w: w, h: h) else { continue }
+            guard Snapshot.interesting(role: role, label: label, id: id, value: value, w: w, h: h) else {
+                stack.append(Frame(depth: depth, nearestKept: parentKept))
+                continue
+            }
             n += 1
             let x = (e["x"] as? Double) ?? 0
             let y = (e["y"] as? Double) ?? 0
@@ -80,12 +100,19 @@ public struct Snapshot {
                 ref: "e\(n)", role: role, label: label, id: id, value: value,
                 x: x, y: y, w: w, h: h,
                 enabled: (e["enabled"] as? Bool) ?? true,
-                depth: (e["depth"] as? Int) ?? 0,
-                onScreen: onScreen
+                depth: depth,
+                onScreen: onScreen,
+                childCount: (e["childCount"] as? Int) ?? 0
             )
+            if let p = parentKept { survivors[p] += 1 }
+            stack.append(Frame(depth: depth, nearestKept: kept.count))
             kept.append(el)
-            map[el.ref] = el
+            survivors.append(0)
         }
+        for i in kept.indices where kept[i].childCount > 0 && survivors[i] == 0 {
+            kept[i].hiddenChildren = kept[i].childCount
+        }
+        for el in kept { map[el.ref] = el }
         self.all = kept
         self.byRef = map
     }
@@ -129,6 +156,10 @@ public struct Snapshot {
         if let v = e.value { s += " =\(Snapshot.escaped(v))" }
         s += " @\(e.cx),\(e.cy)"
         if !e.enabled { s += " (disabled)" }
+        // The element has accessibility children, but every one of them (and
+        // everything below) was filtered out — say so instead of looking like a
+        // leaf. Common for native tab bars / custom-drawn containers.
+        if e.hiddenChildren > 0 { s += " (+\(e.hiddenChildren) hidden)" }
         return s
     }
 

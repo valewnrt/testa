@@ -38,5 +38,11 @@ let package = Package(
             dependencies: ["TestaKit"],
             path: "Tests/TestaKitTests"
         ),
+        // Pure helpers that live in the CLI target (OCR matching, key combos).
+        .testTarget(
+            name: "TestaCLITests",
+            dependencies: ["testa"],
+            path: "Tests/TestaCLITests"
+        ),
     ]
 )

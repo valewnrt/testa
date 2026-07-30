@@ -105,9 +105,13 @@ enum MCP {
                      + untrusted,
                  schema: obj([:])) { _ in ["see"] },
             Tool(name: "find",
-                 description: "Find elements whose label/id/value/role contains the query. Returns matching refs."
+                 description: "Find elements whose label/id/value/role contains the query. Returns matching refs. If the accessibility tree has no match, falls back to on-screen text (OCR); those lines are prefixed `(ocr)` and carry coordinates only — no ref, id or role. ocr=true skips the tree."
                      + untrusted,
-                 schema: obj(["query": pStr], required: ["query"])) { a in ["find", try reqStr(a, "query")] },
+                 schema: obj(["query": pStr, "ocr": pBool], required: ["query"])) { a in
+                     var v = ["find", try reqStr(a, "query")]
+                     if bool(a, "ocr") { v.append("--ocr") }
+                     return v
+                 },
             Tool(name: "tap",
                  description: "Tap an element by selector (eN ref, #identifier, or \"label\") or x/y point. If the selector isn't in the accessibility tree, falls back to tapping visible text via OCR."
                      + diffNote,
@@ -143,19 +147,21 @@ enum MCP {
                      ["scrollto", try reqStr(a, "selector")]
                  },
             Tool(name: "wait",
-                 description: "Poll until a selector appears — or, with gone=true, until it disappears — up to timeoutMs (default 5000).",
-                 schema: obj(["selector": pStr, "gone": pBool, "timeoutMs": pNum],
+                 description: "Poll until a selector appears — or, with gone=true, until it disappears — up to timeoutMs (default 5000). Falls back to on-screen text (OCR) when the accessibility tree has no match; the reply says which source answered, (tree) or (ocr). ocr=true skips the tree.",
+                 schema: obj(["selector": pStr, "gone": pBool, "timeoutMs": pNum, "ocr": pBool],
                              required: ["selector"])) { a in
                      var v = ["wait", try reqStr(a, "selector")]
                      if bool(a, "gone") { v.append("gone") }
                      if let t = numStr(a, "timeoutMs") { v.append(t) }
+                     if bool(a, "ocr") { v.append("--ocr") }
                      return v
                  },
             Tool(name: "assert",
-                 description: "Assert an element's state: cond is exists | gone | value=… | label=…. Returns PASS/FAIL.",
-                 schema: obj(["selector": pStr, "cond": pStr], required: ["selector"])) { a in
+                 description: "Assert an element's state: cond is exists | gone | value=… | label=…. Returns PASS/FAIL. exists/gone fall back to on-screen text (OCR) when the accessibility tree has no match, so screens with zero accessibility are verifiable; the reply says which source answered, (tree) or (ocr). value=/label= are tree-only. ocr=true skips the tree.",
+                 schema: obj(["selector": pStr, "cond": pStr, "ocr": pBool], required: ["selector"])) { a in
                      var v = ["assert", try reqStr(a, "selector")]
                      if let c = str(a, "cond"), !c.isEmpty { v.append(c) }
+                     if bool(a, "ocr") { v.append("--ocr") }
                      return v
                  },
             Tool(name: "launch",
