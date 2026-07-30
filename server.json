@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.valewnrt/testa",
   "description": "Drive the iOS Simulator from an agent: read the screen, tap/type/swipe, replay flows in CI.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "status": "active",
   "websiteUrl": "https://github.com/valewnrt/testa",
   "repository": {
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@valewnrt/testa-mcp",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -39,8 +39,13 @@
   "_meta": {
     "io.github.valewnrt/testa": {
       "note": "The npm package is a thin launcher only. It requires the macOS-native `testa` binary on PATH: `brew tap valewnrt/testa https://github.com/valewnrt/testa && brew install valewnrt/testa/testa`. Once installed, `testa mcp` is itself a stdio MCP server and can be registered directly without npm.",
-      "platforms": ["darwin"],
-      "requires": ["macOS", "Xcode 26 (iOS 26 simulator runtimes)"]
+      "platforms": [
+        "darwin"
+      ],
+      "requires": [
+        "macOS",
+        "Xcode 26 (iOS 26 simulator runtimes)"
+      ]
     }
   }
 }
