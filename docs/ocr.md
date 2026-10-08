@@ -19,7 +19,7 @@ changes.
 
 ## Example
 
-<img src="../assets/ocr-demo.gif" alt="Terminal running testa see, tapocr and assert --ocr next to the simulator; the Canvas-drawn buttons respond" width="720">
+<img src="../assets/testa-ocr-demo.gif" alt="Terminal running testa see, tapocr and assert --ocr next to the simulator; the Canvas-drawn buttons respond" width="720">
 
 The bottom tab row in the showcase is drawn with SwiftUI `Canvas`, so it exposes
 no accessibility elements:

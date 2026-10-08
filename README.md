@@ -18,7 +18,7 @@ SwiftUI apps, and you don't have to add a single `testID`. When the agent is
 done, save the run as a flow file and replay it in CI without a model.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Terminal running testa tap, pinch, rotate, dragdrop, typein, tapocr and assert next to the iOS Simulator, which reacts to each command" width="720">
+  <img src="assets/testa-demo.gif" alt="Terminal running testa tap, pinch, rotate, dragdrop, typein, tapocr and assert next to the iOS Simulator, which reacts to each command" width="720">
 </p>
 
 ## Install
