@@ -283,10 +283,13 @@ final class Daemon {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
         p.arguments = ["-c", "Print CFBundleExecutable", plist]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+        // stderr goes to /dev/null, not a Pipe: an unread Pipe's descriptors stay
+        // open for the daemon's whole lifetime, and this runs once per `crashes`.
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return nil }
         let d = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        try? pipe.fileHandleForReading.close()
         let exe = String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (exe?.isEmpty == false) ? exe : nil
     }
@@ -327,10 +330,13 @@ final class Daemon {
         p.arguments = ["-convert", "json", "-o", "-", "--", tmp]
         let pipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
+        // See appExecutable: an unread Pipe leaks its descriptors for the life of
+        // the daemon. This runs once per `apps`.
+        p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return [] }
         let d = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        try? pipe.fileHandleForReading.close()
         guard let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return [] }
         return obj.compactMap { (bid, v) -> String? in
             guard let dict = v as? [String: Any], (dict["ApplicationType"] as? String) == "User" else { return nil }

@@ -35,6 +35,11 @@ enum Simctl {
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        // readDataToEndOfFile() consumes the stream but does NOT close the
+        // descriptor, and Process keeps the Pipe alive, so without these the
+        // daemon leaks a descriptor per simctl call — thousands over days.
+        try? pipe.fileHandleForReading.close()
+        try? input?.fileHandleForReading.close()
         return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
