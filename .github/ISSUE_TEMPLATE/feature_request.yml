@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest a command, gesture or integration
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the testing situation, not just the feature. What's hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: A command, flag or behavior. An example `testa …` line is great.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried

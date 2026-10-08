@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/valewnrt/testa/discussions
+    about: Ask how to do something, share a flow, or discuss an idea.
+  - name: Security vulnerability
+    url: https://github.com/valewnrt/testa/security/advisories/new
+    about: Report privately, please don't open a public issue.
