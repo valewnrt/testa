@@ -25,6 +25,7 @@ clear "#textInput"
 setvalue "#textInput" hello
 assert #status label=typed:hello
 appearance dark                       # app must survive the trait change
+wait "typed:hello"
 assert #status label=typed:hello
 appearance light
 dragdrop "#dragHandle" "#zoneB"

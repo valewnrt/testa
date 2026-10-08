@@ -258,6 +258,23 @@ final class Daemon {
         }
     }
 
+    // Tapping a text field raises the keyboard. On a cold simulator (CI) the
+    // keyboard process briefly owns the accessibility front, the app's tree
+    // reads empty, and a single lookup fails with "element not found for
+    // setValue". Retry while the element is unreachable instead of giving up.
+    func setValueRetrying(_ text: String, identifier: String?, label: String?, maxMs: Int = 5000) throws {
+        let start = Date()
+        while true {
+            do {
+                try sim.setValue(text, identifier: identifier, label: label)
+                return
+            } catch let e as NSError where e.domain == "com.testa.engine" && e.code == 23
+                        && Date().timeIntervalSince(start) * 1000 < Double(maxMs) {
+                usleep(300 * 1000)
+            }
+        }
+    }
+
     // Wait (bounded) until the tree actually differs from `prev`. Used where the
     // screen changes owner rather than animating in place (hardware buttons).
     func awaitChange(from prev: Snapshot?, maxMs: Int = 1400) {
@@ -736,7 +753,7 @@ final class Daemon {
                 let ident = el?.id ?? (sel.hasPrefix("#") ? String(sel.dropFirst()) : nil)
                 let label = el?.label ?? (!sel.hasPrefix("#") && !sel.hasPrefix("e") ? sel : nil)
                 if el != nil { try sim.tap(x: Double(el!.cx), y: Double(el!.cy)); usleep(150 * 1000) }
-                try sim.setValue("", identifier: ident, label: label)
+                try setValueRetrying("", identifier: ident, label: label)
                 settle()
                 return withDiff("cleared \(sel)", from: pre)
 
@@ -869,7 +886,7 @@ final class Daemon {
                 let ident = el?.id ?? (sel.hasPrefix("#") ? String(sel.dropFirst()) : nil)
                 let label = el?.label ?? (!sel.hasPrefix("#") && !sel.hasPrefix("e") ? sel : nil)
                 if el != nil { try sim.tap(x: Double(el!.cx), y: Double(el!.cy)); usleep(150 * 1000) }
-                try sim.setValue(text, identifier: ident, label: label)
+                try setValueRetrying(text, identifier: ident, label: label)
                 settle()
                 return withDiff("set value of \(sel)", from: pre)
 

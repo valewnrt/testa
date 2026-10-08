@@ -5,6 +5,16 @@ All notable changes to Testa are documented here. Format roughly follows
 
 ## Unreleased
 
+### Fixed
+- **`clear` / `setvalue` no longer fail while the keyboard comes up.** Tapping a
+  text field raises the keyboard; on a cold simulator (CI runners) its process
+  briefly owns the accessibility front and the app's tree reads empty, so the
+  single lookup failed with `element not found for setValue`. The lookup now
+  retries for up to 5 s. This was the main cause of the weekly Xcode-beta job
+  failing on random Xcode versions.
+- The smoke flow waits for the label after `appearance dark` before asserting
+  it; a trait change can re-render the tree empty for a moment.
+
 ### Changed
 - **Docs reorganized.** The README is now a short overview; the full command
   reference, agent setup, flows & CI, architecture, security model, comparison

@@ -26,8 +26,10 @@ setvalue "#textInput" hello
 assert #status label=typed:hello
 
 # Device environment: flip the simulator to dark mode and back. App state has to
-# survive the trait change.
+# survive the trait change. The trait change re-renders the view tree, which
+# can read empty for a moment on a slow runner, so wait for the label first.
 appearance dark
+wait "typed:hello"
 assert #status label=typed:hello
 appearance light
 
