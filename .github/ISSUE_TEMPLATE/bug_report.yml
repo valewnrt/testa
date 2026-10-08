@@ -1,0 +1,69 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems go through [private reporting](https://github.com/valewnrt/testa/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you run, what did you expect, and what happened instead?
+      placeholder: |
+        testa tap "Continue"
+        → replied "tapped" but the screen didn't change
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A flow file or a list of testa commands is ideal.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: testa version
+      description: Output of `testa version`
+      placeholder: testa 0.2.2
+    validations:
+      required: true
+  - type: input
+    id: xcode
+    attributes:
+      label: Xcode, simulator and macOS
+      description: e.g. "Xcode 26.4, iPhone 17 Pro on iOS 26.4, macOS 26.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: App under test
+      options:
+        - SwiftUI / UIKit
+        - React Native / Expo
+        - Flutter
+        - Other / system UI
+    validations:
+      required: true
+  - type: dropdown
+    id: via
+    attributes:
+      label: How are you running Testa?
+      options:
+        - CLI
+        - MCP (Claude Code, Codex, Cursor, …)
+        - flow run / GitHub Action
+  - type: textarea
+    id: layout
+    attributes:
+      label: Output of `testa layout` and `testa status`
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant daemon log
+      description: From `~/.testa/daemon-<udid>.log`, if anything looks related.
+      render: text

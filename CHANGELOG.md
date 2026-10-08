@@ -3,6 +3,16 @@
 All notable changes to Testa are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); versions are git tags.
 
+## Unreleased
+
+### Changed
+- **Docs reorganized.** The README is now a short overview; the full command
+  reference, agent setup, flows & CI, architecture, security model, comparison
+  and troubleshooting live in [`docs/`](docs/). `ONBOARDING.md` was folded into
+  the README and removed.
+- Added `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue forms and a PR template.
+- `.claude-plugin/plugin.json` version synced to 0.2.2.
+
 ## [0.2.2] — 2026-10-08
 
 ### Fixed
