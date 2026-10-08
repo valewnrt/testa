@@ -11,8 +11,8 @@
 class Testa < Formula
   desc "Autonomous iOS Simulator E2E driver for AI agents"
   homepage "https://github.com/valewnrt/testa"
-  url "https://github.com/valewnrt/testa/archive/refs/tags/v0.2.1.tar.gz"
-  sha256 "86d626d248aa0579a1a66ac4303bb79e7f591b8d3f524542c5f7c8e661d7e85a"
+  url "https://github.com/valewnrt/testa/archive/refs/tags/v0.2.2.tar.gz"
+  sha256 "143284c70b48c22ced13283e9375ee1f82424078ba7915ce1834d7fa765c49d6"
   license "MIT"
   head "https://github.com/valewnrt/testa.git", branch: "main"
 
