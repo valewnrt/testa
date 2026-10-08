@@ -3,6 +3,18 @@
 All notable changes to Testa are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); versions are git tags.
 
+## [0.2.2] — 2026-10-08
+
+### Fixed
+- **The daemon no longer leaks file descriptors (and memory).** Every child
+  process it spawned (`simctl` on every command, `plutil` per `apps`,
+  `PlistBuddy` per `crashes`) left its pipe descriptors open, because
+  `readDataToEndOfFile()` drains a pipe without closing it. A long-lived daemon
+  grew steadily: one observed after 12 days held 1488 leaked pipes and 2.85 GB
+  RSS. Read handles are now closed after draining, and discarded stderr goes to
+  `/dev/null` instead of an unread `Pipe`. 30 `apps` calls: +90 pipes before,
+  +0 after. Thanks to @ccstr (#1).
+
 ## [0.2.1] — 2026-07-30
 
 Bug-fix release from dogfooding 0.2.0 against real apps. The headline is a
